@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "src/index.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/index.ts"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/sync-ads",
+      "schedule": "0 */4 * * *"
+    },
+    {
+      "path": "/api/cron/sync-crm",
+      "schedule": "0 */3 * * *"
+    }
+  ]
+}
