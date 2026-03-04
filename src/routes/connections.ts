@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
+import { syncBitrix24 } from '../services/bitrix24';
+import { syncAmoCRM } from '../services/amocrm';
 
 const router = Router();
 
@@ -187,6 +189,64 @@ router.post('/crm/:id/sync', requireAuth, async (req, res) => {
   } catch (err: any) {
     console.error(`[Sync] CRM sync failed for ${conn.id}:`, err.message);
     res.status(500).json({ error: err.message || 'Sync failed' });
+  }
+});
+
+// POST /api/connections/crm/:id/sync-stream  — SSE streaming CRM sync with progress
+const SYNC_STREAM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+router.post('/crm/:id/sync-stream', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Close SSE after 5 minutes to prevent indefinite connections
+  const timeout = setTimeout(() => {
+    res.write(`data: ${JSON.stringify({ error: 'Sync timeout exceeded', step: 'Ошибка', progress: 0 })}\n\n`);
+    res.end();
+  }, SYNC_STREAM_TIMEOUT_MS);
+
+  const sendProgress = (step: string, progress: number) => {
+    res.write(`data: ${JSON.stringify({ step, progress, timestamp: Date.now() })}\n\n`);
+  };
+
+  try {
+    const { data: conn } = await supabase
+      .from('crm_connections').select('*').eq('id', req.params.id).single();
+
+    if (!conn) {
+      clearTimeout(timeout);
+      res.write(`data: ${JSON.stringify({ error: 'Connection not found', step: 'Ошибка', progress: 0 })}\n\n`);
+      return res.end();
+    }
+
+    const { data: client } = await supabase
+      .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
+
+    if (!client) {
+      clearTimeout(timeout);
+      res.write(`data: ${JSON.stringify({ error: 'Access denied', step: 'Ошибка', progress: 0 })}\n\n`);
+      return res.end();
+    }
+
+    let result: any;
+    if (conn.type === 'bitrix24') {
+      result = await syncBitrix24(conn as any, undefined, sendProgress);
+    } else if (conn.type === 'amocrm') {
+      result = await syncAmoCRM(conn as any, undefined, sendProgress);
+    }
+
+    clearTimeout(timeout);
+    res.write(`data: ${JSON.stringify({ step: 'Завершено', progress: 100, done: true, result })}\n\n`);
+    res.end();
+  } catch (error: any) {
+    clearTimeout(timeout);
+    console.error('[Sync Stream] Error:', error);
+    res.write(`data: ${JSON.stringify({ error: error.message || 'Ошибка синхронизации', step: 'Ошибка', progress: 0 })}\n\n`);
+    res.end();
   }
 });
 
