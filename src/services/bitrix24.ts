@@ -43,13 +43,22 @@ interface BitrixLead {
 export async function syncBitrix24(connection: CrmConnection, since?: Date) {
   console.log(`[Bitrix24] Syncing ${connection.domain}`);
 
+  // Webhook mode: access_token is empty, domain is the full webhook path
+  // e.g. "b24-xxx.bitrix24.ru/rest/1/xxxxxx/"
+  // OAuth mode: access_token is set, domain is just the hostname
+  const isWebhook = !connection.access_token;
+
   let accessToken = connection.access_token;
-  if (connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
+  if (!isWebhook && connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
     accessToken = await refreshBitrixToken(connection);
   }
 
-  const baseUrl = `https://${connection.domain}/rest`;
-  const authParams = { auth: accessToken };
+  // Webhook: baseUrl = full webhook URL (already contains auth path)
+  // OAuth:   baseUrl = https://domain/rest  (auth via query param)
+  const baseUrl = isWebhook
+    ? `https://${connection.domain.replace(/\/$/, '')}`
+    : `https://${connection.domain}/rest`;
+  const authParams = isWebhook ? {} : { auth: accessToken };
 
   const leads: CrmLead[] = [];
   let start = 0;
