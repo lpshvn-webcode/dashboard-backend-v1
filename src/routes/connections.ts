@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
-import { syncAllAdsAccounts, syncAllCrmConnections } from '../services/sync-orchestrator';
+import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
 
 const router = Router();
 
@@ -118,7 +118,7 @@ router.get('/crm', requireAuth, async (req, res) => {
 
   const { data, error } = await supabase
     .from('crm_connections')
-    .select('id,type,domain,is_active,last_synced_at,created_at')
+    .select('id,type,domain,sync_type,is_active,last_synced_at,created_at')
     .eq('client_id', clientId);
 
   if (error) return res.status(500).json({ error: error.message });
@@ -126,9 +126,9 @@ router.get('/crm', requireAuth, async (req, res) => {
 });
 
 // POST /api/connections/crm
-// Body: { clientId, type, domain, accessToken, refreshToken? }
+// Body: { clientId, type, domain, accessToken, refreshToken?, syncType? }
 router.post('/crm', requireAuth, async (req, res) => {
-  const { clientId, type, domain, accessToken, refreshToken } = req.body;
+  const { clientId, type, domain, accessToken, refreshToken, syncType } = req.body;
   const userId = (req as any).user.id;
 
   const { data: client } = await supabase
@@ -143,6 +143,7 @@ router.post('/crm', requireAuth, async (req, res) => {
       domain: domain.replace(/^https?:\/\//, ''),
       access_token: accessToken,
       refresh_token: refreshToken,
+      sync_type: syncType || 'leads',
       is_active: true,
     })
     .select()
@@ -168,7 +169,7 @@ router.delete('/crm/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/connections/crm/:id/sync  — trigger manual CRM sync
+// POST /api/connections/crm/:id/sync  — trigger manual CRM sync (awaits completion)
 router.post('/crm/:id/sync', requireAuth, async (req, res) => {
   const userId = (req as any).user.id;
 
@@ -180,8 +181,13 @@ router.post('/crm/:id/sync', requireAuth, async (req, res) => {
     .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
-  syncAllCrmConnections(conn.client_id).catch(console.error);
-  res.json({ ok: true, message: 'CRM sync started' });
+  try {
+    const result = await syncSingleCrmConnection(conn);
+    res.json({ ok: true, message: 'CRM sync complete', result });
+  } catch (err: any) {
+    console.error(`[Sync] CRM sync failed for ${conn.id}:`, err.message);
+    res.status(500).json({ error: err.message || 'Sync failed' });
+  }
 });
 
 export default router;

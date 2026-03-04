@@ -139,6 +139,7 @@ export interface CreativeStat {
 }
 
 export type CrmType = 'amocrm' | 'bitrix24';
+export type CrmSyncType = 'leads' | 'deals' | 'both';
 
 export interface CrmConnection {
   id: string;
@@ -149,6 +150,7 @@ export interface CrmConnection {
   refresh_token?: string;
   token_expires_at?: string;
   webhook_secret?: string;
+  sync_type: CrmSyncType;   // 'leads' | 'deals' | 'both' (Bitrix24 only)
   is_active: boolean;
   last_synced_at?: string;
   created_at: string;
@@ -159,7 +161,7 @@ export interface CrmLead {
   crm_connection_id: string;
   client_id: string;
   crm_type: CrmType;
-  lead_id: string;          // CRM's own lead ID
+  lead_id: string;          // CRM's own lead ID (prefixed: 'L_' for leads, 'D_' for deals)
   lead_name: string;
   status: string;
   pipeline_id?: string;
@@ -169,6 +171,9 @@ export interface CrmLead {
   closed_at?: string;
   price?: number;
   currency?: string;
+  phone?: string;           // Phone number for deduplication
+  record_type?: string;     // 'lead' or 'deal'
+  is_duplicate?: boolean;   // Marked if same phone exists in both leads and deals
   // UTM params for cross-analytics
   utm_source?: string;
   utm_medium?: string;

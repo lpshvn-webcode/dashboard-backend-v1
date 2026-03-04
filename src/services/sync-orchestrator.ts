@@ -82,6 +82,28 @@ export async function syncAllAdsAccounts(clientId?: string) {
   }
 }
 
+/** Sync a single CRM connection and log the result. Called by manual sync endpoint. */
+export async function syncSingleCrmConnection(connection: CrmConnection) {
+  const startedAt = new Date();
+  const since = connection.last_synced_at
+    ? new Date(new Date(connection.last_synced_at).getTime() - 2 * 24 * 60 * 60 * 1000) // 2 days back
+    : undefined;
+
+  let totalRecords = 0;
+  let result: any = {};
+
+  if (connection.type === 'amocrm') {
+    result = await syncAmoCRM(connection, since);
+    totalRecords = result.leads;
+  } else if (connection.type === 'bitrix24') {
+    result = await syncBitrix24(connection, since);
+    totalRecords = (result.leads || 0) + (result.deals || 0);
+  }
+
+  await logSync(connection.client_id, connection.type, 'success', totalRecords, startedAt);
+  return result;
+}
+
 export async function syncAllCrmConnections(clientId?: string) {
   const query = supabase
     .from('crm_connections')
@@ -100,23 +122,14 @@ export async function syncAllCrmConnections(clientId?: string) {
 
   for (const connection of connections as CrmConnection[]) {
     const startedAt = new Date();
-    const since = connection.last_synced_at
-      ? new Date(new Date(connection.last_synced_at).getTime() - 2 * 24 * 60 * 60 * 1000) // 2 days back
-      : undefined;
-
     try {
-      let totalRecords = 0;
-
-      if (connection.type === 'amocrm') {
-        const result = await syncAmoCRM(connection, since);
-        totalRecords = result.leads;
-      } else if (connection.type === 'bitrix24') {
-        const result = await syncBitrix24(connection, since);
-        totalRecords = result.leads;
-      }
-
-      await logSync(connection.client_id, connection.type, 'success', totalRecords, startedAt);
+      const result = await syncSingleCrmConnection(connection);
+      const totalRecords = (result.leads || 0) + (result.deals || 0);
+      console.log(`[Sync] CRM ${connection.type} done: ${totalRecords} records`);
     } catch (err: any) {
+      const since = connection.last_synced_at
+        ? new Date(new Date(connection.last_synced_at).getTime() - 2 * 24 * 60 * 60 * 1000)
+        : undefined;
       console.error(`[Sync] CRM sync failed for ${connection.id}:`, err.message);
       await logSync(connection.client_id, connection.type, 'error', 0, startedAt, err.message);
     }
