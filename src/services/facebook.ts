@@ -44,7 +44,6 @@ interface FbInsight {
   ctr: string;
   cpc: string;
   actions?: Array<{ action_type: string; value: string }>;
-  currency: string;
 }
 
 function extractLeads(actions?: FbInsight['actions']): number {
@@ -63,7 +62,7 @@ async function fetchWithToken(url: string, params: Record<string, string>) {
 export async function syncFacebookAccount(account: AdAccount, dateRange: { since: string; until: string }) {
   console.log(`[FB] Syncing account ${account.account_id} (${account.account_name})`);
 
-  const insightFields = 'spend,impressions,clicks,reach,ctr,cpc,actions,currency';
+  const insightFields = 'spend,impressions,clicks,reach,ctr,cpc,actions';
   const timeRange = JSON.stringify({ since: dateRange.since, until: dateRange.until });
   const actId = `act_${account.account_id}`;
 
@@ -101,7 +100,7 @@ export async function syncFacebookAccount(account: AdAccount, dateRange: { since
           ctr: parseFloat(insight.ctr) || 0,
           cpl: leads > 0 ? spend / leads : 0,
           cpc: parseFloat(insight.cpc) || 0,
-          currency: insight.currency,
+          currency: 'USD',
           created_at: '',
         });
       }
@@ -157,7 +156,7 @@ export async function syncFacebookAccount(account: AdAccount, dateRange: { since
           ctr: parseFloat(insight.ctr) || 0,
           cpl: leads > 0 ? spend / leads : 0,
           cpc: parseFloat(insight.cpc) || 0,
-          currency: insight.currency,
+          currency: 'USD',
           created_at: '',
         });
       }
@@ -209,7 +208,7 @@ export async function syncFacebookAccount(account: AdAccount, dateRange: { since
           cpl: leads > 0 ? spend / leads : 0,
           image_url: ad.creative?.image_url,
           thumbnail_url: ad.creative?.thumbnail_url,
-          currency: insight.currency,
+          currency: 'USD',
           created_at: '',
         });
       }
