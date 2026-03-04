@@ -61,8 +61,14 @@ function extractUtm(lead: AmoLead) {
   return utm;
 }
 
-export async function syncAmoCRM(connection: CrmConnection, since?: Date) {
+export async function syncAmoCRM(
+  connection: CrmConnection,
+  since?: Date,
+  onProgress?: (step: string, progress: number) => void,
+) {
+  const progress = onProgress || (() => {});
   console.log(`[AmoCRM] Syncing ${connection.domain}`);
+  progress('Подключение к AmoCRM...', 5);
 
   let accessToken = connection.access_token;
   if (connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
@@ -73,6 +79,7 @@ export async function syncAmoCRM(connection: CrmConnection, since?: Date) {
   const baseUrl = `https://${connection.domain}/api/v4`;
 
   // Load pipelines for name resolution
+  progress('Загрузка воронок...', 15);
   const pipelinesRes = await axios.get(`${baseUrl}/leads/pipelines`, { headers });
   const pipelines: Record<number, { name: string; statuses: Record<number, string> }> = {};
   for (const pipeline of pipelinesRes.data._embedded?.pipelines || []) {
@@ -95,6 +102,7 @@ export async function syncAmoCRM(connection: CrmConnection, since?: Date) {
   const leads: CrmLead[] = [];
   let page = 1;
   const sinceTs = since ? Math.floor(since.getTime() / 1000) : undefined;
+  progress('Выгрузка лидов...', 30);
 
   while (true) {
     const params: Record<string, string | number> = {
@@ -139,8 +147,10 @@ export async function syncAmoCRM(connection: CrmConnection, since?: Date) {
 
     if (!res.data._links?.next) break;
     page++;
+    progress(`Загружено ${leads.length} лидов...`, Math.min(30 + page * 5, 75));
   }
 
+  progress('Сохранение в базу данных...', 85);
   if (leads.length > 0) {
     const { error } = await supabase
       .from('crm_leads')
@@ -148,10 +158,15 @@ export async function syncAmoCRM(connection: CrmConnection, since?: Date) {
         leads.map(({ id, created_at, ...rest }) => rest),
         { onConflict: 'crm_connection_id,lead_id' }
       );
-    if (error) console.error('[AmoCRM] Upsert error:', error.message);
-    else console.log(`[AmoCRM] Upserted ${leads.length} leads`);
+    if (error) {
+      console.error('[AmoCRM] Upsert error:', error.message);
+    } else {
+      console.log(`[AmoCRM] Upserted ${leads.length} leads`);
+      progress(`Сохранено ${leads.length} лидов`, 90);
+    }
   }
 
+  progress('Завершение...', 100);
   await supabase
     .from('crm_connections')
     .update({ last_synced_at: new Date().toISOString() })

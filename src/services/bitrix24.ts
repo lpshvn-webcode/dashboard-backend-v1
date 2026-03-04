@@ -63,6 +63,28 @@ interface BitrixDeal {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+/** Validate and normalize a Bitrix24 webhook URL */
+function normalizeWebhookUrl(domain: string): string {
+  let url = domain.trim();
+
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url;
+  }
+
+  url = url.replace(/\/$/, '');
+
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.includes('bitrix24') && !parsed.hostname.includes('b24')) {
+      throw new Error('URL должен содержать bitrix24');
+    }
+    return url;
+  } catch (e: any) {
+    if (e.message.includes('bitrix24')) throw e;
+    throw new Error('Некорректный формат webhook URL');
+  }
+}
+
 /** Paginate through a Bitrix24 list method and return all items */
 async function fetchAllPages<T>(
   baseUrl: string,
@@ -70,27 +92,62 @@ async function fetchAllPages<T>(
   authParams: Record<string, string>,
   selectFields: string[],
   filterParams: Record<string, string>,
+  onPageProgress?: (message: string) => void,
 ): Promise<T[]> {
   const all: T[] = [];
   let start = 0;
+  let retries = 0;
+  const MAX_RETRIES = 3;
 
   while (true) {
-    const res = await axios.get(`${baseUrl}/${method}`, {
-      params: {
-        ...authParams,
-        SELECT: selectFields,
-        FILTER: filterParams,
-        start,
-      },
-    });
+    try {
+      const res = await axios.get(`${baseUrl}/${method}`, {
+        params: {
+          ...authParams,
+          SELECT: selectFields,
+          FILTER: filterParams,
+          start,
+        },
+        timeout: 30000,
+      });
 
-    const items: T[] = res.data.result || [];
-    if (items.length === 0) break;
-    all.push(...items);
+      const items: T[] = res.data.result || [];
+      if (items.length === 0) break;
+      all.push(...items);
 
-    const total: number = res.data.total || 0;
-    start += items.length;
-    if (start >= total) break;
+      const total: number = res.data.total || 0;
+      start += items.length;
+
+      if (onPageProgress) {
+        onPageProgress(`Загружено ${all.length} из ${total}`);
+      }
+
+      if (start >= total) break;
+      retries = 0;
+    } catch (error: any) {
+      if (error.response?.status === 429) {
+        const waitTime = Math.min(1000 * Math.pow(2, retries), 10000);
+        console.warn(`[Bitrix24] Rate limited on ${method}, waiting ${waitTime}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        retries++;
+        if (retries >= MAX_RETRIES) {
+          throw new Error('Превышен лимит запросов к Bitrix24 API');
+        }
+        continue;
+      }
+
+      if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+        console.error(`[Bitrix24] Timeout on ${method}, retrying... (attempt ${retries + 1})`);
+        retries++;
+        if (retries >= MAX_RETRIES) {
+          throw new Error('Превышено время ожидания ответа от Bitrix24');
+        }
+        continue;
+      }
+
+      console.error(`[Bitrix24] Error fetching ${method}:`, error.message);
+      throw new Error(`Ошибка при запросе к Bitrix24: ${error.message}`);
+    }
   }
 
   return all;
@@ -132,7 +189,12 @@ function normalizePhone(raw: string): string {
 
 // ── Main sync function ─────────────────────────────────────────────────────────
 
-export async function syncBitrix24(connection: CrmConnection, since?: Date) {
+export async function syncBitrix24(
+  connection: CrmConnection,
+  since?: Date,
+  onProgress?: (step: string, progress: number) => void,
+) {
+  const progress = onProgress || (() => {});
   console.log(`[Bitrix24] Syncing ${connection.domain}`);
 
   const syncType: CrmSyncType = connection.sync_type || 'leads';
@@ -142,6 +204,8 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
   // OAuth mode: access_token is set, domain is just the hostname
   const isWebhook = !connection.access_token;
 
+  progress('Подключение к Bitrix24...', 5);
+
   let accessToken = connection.access_token;
   if (!isWebhook && connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
     accessToken = await refreshBitrixToken(connection);
@@ -149,10 +213,20 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
 
   // Webhook: baseUrl = full webhook URL (already contains auth path)
   // OAuth:   baseUrl = https://domain/rest  (auth via query param)
-  const baseUrl = isWebhook
-    ? `https://${connection.domain.replace(/\/$/, '')}`
-    : `https://${connection.domain}/rest`;
-  const authParams = isWebhook ? {} : { auth: accessToken };
+  const rawBaseUrl = isWebhook
+    ? connection.domain
+    : `${connection.domain}/rest`;
+
+  let baseUrl: string;
+  try {
+    baseUrl = normalizeWebhookUrl(rawBaseUrl);
+  } catch {
+    baseUrl = isWebhook
+      ? `https://${connection.domain.replace(/\/$/, '')}`
+      : `https://${connection.domain}/rest`;
+  }
+
+  const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
 
   const filterParams: Record<string, string> = {};
   if (since) {
@@ -164,6 +238,7 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
   // ── Sync Leads ──────────────────────────────────────────────────────────────
   if (syncType === 'leads' || syncType === 'both') {
     console.log(`[Bitrix24] Fetching leads...`);
+    progress('Выгрузка лидов...', 20);
 
     const rawLeads = await fetchAllPages<BitrixLead>(
       baseUrl,
@@ -176,6 +251,7 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
         'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
       ],
       filterParams,
+      (msg) => progress(msg, 25),
     );
 
     for (const item of rawLeads) {
@@ -206,11 +282,13 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
     }
 
     console.log(`[Bitrix24] Fetched ${rawLeads.length} leads`);
+    progress(`Обработано ${rawLeads.length} лидов`, 40);
   }
 
   // ── Sync Deals ──────────────────────────────────────────────────────────────
   if (syncType === 'deals' || syncType === 'both') {
     console.log(`[Bitrix24] Fetching deals...`);
+    progress('Выгрузка сделок...', 60);
 
     const rawDeals = await fetchAllPages<BitrixDeal>(
       baseUrl,
@@ -223,13 +301,17 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
         'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
       ],
       filterParams,
+      (msg) => progress(msg, 65),
     );
+
+    progress(`Обработано ${rawDeals.length} сделок`, 70);
 
     // Batch-fetch contact phones for all deals
     const uniqueContactIds = [...new Set(rawDeals.map(d => d.CONTACT_ID).filter(Boolean) as string[])];
     const contactPhones = await fetchContactPhones(baseUrl, authParams, uniqueContactIds);
 
     console.log(`[Bitrix24] Fetched ${rawDeals.length} deals, resolved ${Object.keys(contactPhones).length} contact phones`);
+    progress(`Загружено ${Object.keys(contactPhones).length} телефонов`, 75);
 
     for (const item of rawDeals) {
       const phone = item.CONTACT_ID && contactPhones[item.CONTACT_ID]
@@ -263,6 +345,7 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
   }
 
   // ── Upsert records ──────────────────────────────────────────────────────────
+  progress('Сохранение в базу данных...', 85);
   if (records.length > 0) {
     const { error } = await supabase
       .from('crm_leads')
@@ -270,14 +353,19 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
         records.map(({ id, created_at, ...rest }) => rest),
         { onConflict: 'crm_connection_id,lead_id' },
       );
-    if (error) console.error('[Bitrix24] Upsert error:', error.message);
-    else console.log(`[Bitrix24] Upserted ${records.length} records`);
+    if (error) {
+      console.error('[Bitrix24] Upsert error:', error.message);
+    } else {
+      console.log(`[Bitrix24] Upserted ${records.length} records`);
+      progress(`Сохранено ${records.length} записей`, 90);
+    }
   }
 
   // ── Deduplicate by phone (only when syncing both leads and deals) ─────────
   let duplicatesMarked = 0;
   if (syncType === 'both') {
     console.log(`[Bitrix24] Deduplicating by phone...`);
+    progress('Очищение дублей...', 95);
 
     // Get all phones that exist in deals for this connection
     const { data: dealRows } = await supabase
@@ -287,7 +375,11 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
       .eq('record_type', 'deal')
       .not('phone', 'is', null);
 
-    const dealPhones = [...new Set((dealRows || []).map(r => r.phone).filter(Boolean))];
+    const dealPhones = [...new Set(
+      ((dealRows || []) as Array<{ phone: string }>)
+        .map(r => r.phone)
+        .filter((p): p is string => Boolean(p)),
+    )];
 
     if (dealPhones.length > 0) {
       const { count, error } = await supabase
@@ -303,6 +395,7 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
       } else {
         duplicatesMarked = count || 0;
         console.log(`[Bitrix24] Marked ${duplicatesMarked} leads as duplicates`);
+        progress(`Помечено ${duplicatesMarked} дублей`, 98);
       }
     }
 
@@ -313,12 +406,13 @@ export async function syncBitrix24(connection: CrmConnection, since?: Date) {
       .update({ is_duplicate: false })
       .eq('crm_connection_id', connection.id)
       .eq('record_type', 'lead')
-      .not('phone', 'in', `(${dealPhones.map(p => `'${p}'`).join(',') || "'__none__'"})`);
+      .not('phone', 'in', `(${dealPhones.map((p: string) => `'${p}'`).join(',') || "'__none__'"})`);
 
     if (resetError) console.error('[Bitrix24] Dedup reset error:', resetError.message);
   }
 
   // ── Update last_synced_at ────────────────────────────────────────────────
+  progress('Завершение...', 100);
   await supabase
     .from('crm_connections')
     .update({ last_synced_at: new Date().toISOString() })
