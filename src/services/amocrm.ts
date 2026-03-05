@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { CrmConnection, CrmLead } from '../types/database';
+import { normalizePhone } from '../utils/phone';
 
 async function refreshAmoToken(connection: CrmConnection): Promise<string> {
   const response = await axios.post(`https://${connection.domain}/oauth2/access_token`, {
@@ -136,6 +137,7 @@ export async function syncAmoCRM(
         closed_at: lead.closed_at ? new Date(lead.closed_at * 1000).toISOString() : undefined,
         price: lead.price || undefined,
         currency: 'KZT',
+        phone: normalizePhone(lead.custom_fields_values?.find(f => f.field_code === 'PHONE')?.values?.[0]?.value),
         utm_source: utm.utm_source,
         utm_medium: utm.utm_medium,
         utm_campaign: utm.utm_campaign,

@@ -34,3 +34,35 @@ export const requireCronSecret = (req: Request, res: Response, next: NextFunctio
   }
   next();
 };
+
+/**
+ * Middleware для SSE endpoints — читает токен из query параметра
+ * Используется для /sync-stream т.к. EventSource не поддерживает custom headers
+ */
+export async function requireAuthFromQuery(req: Request, res: Response, next: NextFunction) {
+  const token = req.query.token as string;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized: token required in query' });
+  }
+
+  try {
+    const userSupabase = createClient(
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_ANON_KEY!,
+      { global: { headers: { Authorization: `Bearer ${token}` } } }
+    );
+
+    const { data: { user }, error } = await userSupabase.auth.getUser();
+
+    if (error || !user) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    (req as any).user = user;
+    next();
+  } catch (err) {
+    console.error('[Auth] Query token validation error:', err);
+    res.status(401).json({ error: 'Token validation failed' });
+  }
+}
