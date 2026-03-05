@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth, requireAuthFromQuery } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
+import { syncFacebookAccount } from '../services/facebook';
 import { syncBitrix24 } from '../services/bitrix24';
 import { syncAmoCRM } from '../services/amocrm';
 
@@ -105,6 +106,78 @@ router.post('/ad-accounts/:id/sync', requireAuth, async (req, res) => {
   // Trigger async sync (don't wait for it)
   syncAllAdsAccounts(account.client_id).catch(console.error);
   res.json({ ok: true, message: 'Sync started' });
+});
+
+// GET /api/connections/ad-accounts/:id/sync-stream  — SSE streaming ad account sync
+const AD_SYNC_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+router.get('/ad-accounts/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
+  const userId = (req as any).user.id;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const timeout = setTimeout(() => {
+    res.write(`data: ${JSON.stringify({ error: 'Sync timeout exceeded', step: 'Ошибка', progress: 0 })}\n\n`);
+    res.end();
+  }, AD_SYNC_TIMEOUT_MS);
+
+  const sendProgress = (step: string, progress: number) => {
+    res.write(`data: ${JSON.stringify({ step, progress, timestamp: Date.now() })}\n\n`);
+  };
+
+  try {
+    const { data: account } = await supabase
+      .from('ad_accounts').select('*').eq('id', req.params.id).single();
+
+    if (!account) {
+      clearTimeout(timeout);
+      res.write(`data: ${JSON.stringify({ error: 'Account not found', step: 'Ошибка', progress: 0 })}\n\n`);
+      return res.end();
+    }
+
+    const { data: client } = await supabase
+      .from('clients').select('id').eq('id', account.client_id).eq('user_id', userId).single();
+
+    if (!client) {
+      clearTimeout(timeout);
+      res.write(`data: ${JSON.stringify({ error: 'Access denied', step: 'Ошибка', progress: 0 })}\n\n`);
+      return res.end();
+    }
+
+    // Determine date range (same logic as sync-orchestrator)
+    const until = new Date();
+    const since = new Date();
+    if (account.last_synced_at) {
+      since.setDate(since.getDate() - 2);
+    } else {
+      since.setDate(since.getDate() - 30);
+    }
+    const dateRange = {
+      since: since.toISOString().split('T')[0],
+      until: until.toISOString().split('T')[0],
+    };
+
+    let result: any;
+    if (account.platform === 'facebook') {
+      result = await syncFacebookAccount(account as any, dateRange, sendProgress);
+    } else {
+      // Google / other: fallback without progress
+      sendProgress('Синхронизация...', 50);
+      result = await syncAllAdsAccounts(account.client_id);
+    }
+
+    clearTimeout(timeout);
+    res.write(`data: ${JSON.stringify({ step: 'Завершено', progress: 100, done: true, result })}\n\n`);
+    res.end();
+  } catch (error: any) {
+    clearTimeout(timeout);
+    console.error('[Ad Sync Stream] Error:', error);
+    res.write(`data: ${JSON.stringify({ error: error.message || 'Ошибка синхронизации', step: 'Ошибка', progress: 0 })}\n\n`);
+    res.end();
+  }
 });
 
 // ── CRM Connections ────────────────────────────────────────────────────────────

@@ -59,15 +59,23 @@ async function fetchWithToken(url: string, params: Record<string, string>) {
   return response.data;
 }
 
-export async function syncFacebookAccount(account: AdAccount, dateRange: { since: string; until: string }) {
+export async function syncFacebookAccount(
+  account: AdAccount,
+  dateRange: { since: string; until: string },
+  onProgress?: (step: string, progress: number) => void,
+) {
+  const progress = onProgress || (() => {});
   console.log(`[FB] Syncing account ${account.account_id} (${account.account_name})`);
 
   const insightFields = 'spend,impressions,clicks,reach,ctr,cpc,actions';
   const timeRange = JSON.stringify({ since: dateRange.since, until: dateRange.until });
   const actId = `act_${account.account_id}`;
 
+  progress('Подключение к Facebook Ads...', 5);
+
   try {
     // ── 1. Campaigns ──────────────────────────────────────────────────────────
+    progress('Загрузка кампаний...', 15);
     const campaignsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
       fields: `id,name,status,effective_status,insights.time_range(${JSON.stringify(dateRange)}){${insightFields},date_start}`,
@@ -117,8 +125,10 @@ export async function syncFacebookAccount(account: AdAccount, dateRange: { since
       if (error) console.error('[FB] Campaign upsert error:', error.message);
       else console.log(`[FB] Upserted ${campaignStats.length} campaign stats`);
     }
+    progress(`Сохранено ${campaignStats.length} записей кампаний`, 35);
 
     // ── 2. Ad Sets ────────────────────────────────────────────────────────────
+    progress('Загрузка групп объявлений...', 45);
     const adsetsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/adsets`, {
       access_token: account.access_token,
       fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${JSON.stringify(dateRange)}){${insightFields},date_start}`,
@@ -172,8 +182,10 @@ export async function syncFacebookAccount(account: AdAccount, dateRange: { since
       if (error) console.error('[FB] Adset upsert error:', error.message);
       else console.log(`[FB] Upserted ${adsetStats.length} adset stats`);
     }
+    progress(`Сохранено ${adsetStats.length} групп объявлений`, 65);
 
     // ── 3. Ads (Creatives) ────────────────────────────────────────────────────
+    progress('Загрузка объявлений...', 72);
     const adsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/ads`, {
       access_token: account.access_token,
       fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${JSON.stringify(dateRange)}){${insightFields},date_start}`,
@@ -224,8 +236,10 @@ export async function syncFacebookAccount(account: AdAccount, dateRange: { since
       if (error) console.error('[FB] Creative upsert error:', error.message);
       else console.log(`[FB] Upserted ${creativeStats.length} creative stats`);
     }
+    progress(`Сохранено ${creativeStats.length} объявлений`, 90);
 
     // Update last_synced_at
+    progress('Завершение...', 98);
     await supabase
       .from('ad_accounts')
       .update({ last_synced_at: new Date().toISOString() })
