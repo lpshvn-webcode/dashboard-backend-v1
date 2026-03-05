@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireAuth } from '../middleware/auth';
+import { requireAuth, requireAuthFromQuery } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
 import { syncBitrix24 } from '../services/bitrix24';
@@ -195,7 +195,7 @@ router.post('/crm/:id/sync', requireAuth, async (req, res) => {
 // POST /api/connections/crm/:id/sync-stream  — SSE streaming CRM sync with progress
 const SYNC_STREAM_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-router.post('/crm/:id/sync-stream', requireAuth, async (req, res) => {
+router.post('/crm/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
   const userId = (req as any).user.id;
 
   res.setHeader('Content-Type', 'text/event-stream');

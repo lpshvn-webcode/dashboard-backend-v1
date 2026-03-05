@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { supabase } from '../lib/supabase';
 import { CrmConnection, CrmLead, CrmSyncType } from '../types/database';
+import { normalizePhone } from '../utils/phone';
 
 async function refreshBitrixToken(connection: CrmConnection): Promise<string> {
   const response = await axios.get('https://oauth.bitrix.info/oauth/token/', {
@@ -174,17 +175,14 @@ async function fetchContactPhones(
     });
 
     for (const contact of res.data.result || []) {
-      const phone = contact.PHONE?.[0]?.VALUE;
-      if (phone) phoneMap[contact.ID] = normalizePhone(phone);
+      const phoneValue = contact.PHONE?.[0]?.VALUE;
+      if (phoneValue) {
+        phoneMap[contact.ID] = normalizePhone(phoneValue) as string;
+      }
     }
   }
 
   return phoneMap;
-}
-
-/** Strip everything except digits and leading '+' */
-function normalizePhone(raw: string): string {
-  return raw.replace(/[^\d+]/g, '');
 }
 
 // ── Main sync function ─────────────────────────────────────────────────────────
