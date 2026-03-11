@@ -82,12 +82,12 @@ export async function matchUtmForClient(
     .select('adset_id, adset_name, campaign_id')
     .eq('client_id', clientId);
 
-  // Ключ: "campaign_id|norm(adset_name)" → adset_id
-  const adsetMap = new Map<string, string>();
+  // Ключ: "campaign_id|norm(adset_name)" → { id, name }
+  const adsetMap = new Map<string, { id: string; name: string }>();
   for (const row of adsets || []) {
     const key = `${row.campaign_id}|${normalize(row.adset_name)}`;
     if (!adsetMap.has(key)) {
-      adsetMap.set(key, row.adset_id);
+      adsetMap.set(key, { id: row.adset_id, name: row.adset_name });
     }
   }
 
@@ -97,12 +97,12 @@ export async function matchUtmForClient(
     .select('ad_id, ad_name, adset_id, campaign_id')
     .eq('client_id', clientId);
 
-  // Ключ: "adset_id|norm(ad_name)" → ad_id
-  const adMap = new Map<string, string>();
+  // Ключ: "adset_id|norm(ad_name)" → { id, name }
+  const adMap = new Map<string, { id: string; name: string }>();
   for (const row of creatives || []) {
     const key = `${row.adset_id}|${normalize(row.ad_name)}`;
     if (!adMap.has(key)) {
-      adMap.set(key, row.ad_id);
+      adMap.set(key, { id: row.ad_id, name: row.ad_name });
     }
   }
 
@@ -122,34 +122,35 @@ export async function matchUtmForClient(
     if (utms.size === 0) { skipped++; continue; }
 
     // Найти кампанию
-    let matchedCampaignId: string | null = null;
+    let matchedCampaign: { id: string; name: string } | null = null;
     for (const [normName, camp] of campaignMap) {
-      if (utms.has(normName)) { matchedCampaignId = camp.id; break; }
+      if (utms.has(normName)) { matchedCampaign = camp; break; }
     }
 
-    if (!matchedCampaignId) { skipped++; continue; }
+    if (!matchedCampaign) { skipped++; continue; }
 
-    // Найти адсет внутри кампании
-    let matchedAdsetId: string | null = null;
+    // Найти адсет внутри кампании (ключ по campaign_id для уникальности)
+    let matchedAdset: { id: string; name: string } | null = null;
     for (const utm of utms) {
-      const key = `${matchedCampaignId}|${utm}`;
-      if (adsetMap.has(key)) { matchedAdsetId = adsetMap.get(key)!; break; }
+      const key = `${matchedCampaign.id}|${utm}`;
+      if (adsetMap.has(key)) { matchedAdset = adsetMap.get(key)!; break; }
     }
 
-    // Найти объявление внутри адсета
-    let matchedAdId: string | null = null;
-    if (matchedAdsetId) {
+    // Найти объявление внутри адсета (ключ по adset_id для уникальности)
+    let matchedAd: { id: string; name: string } | null = null;
+    if (matchedAdset) {
       for (const utm of utms) {
-        const key = `${matchedAdsetId}|${utm}`;
-        if (adMap.has(key)) { matchedAdId = adMap.get(key)!; break; }
+        const key = `${matchedAdset.id}|${utm}`;
+        if (adMap.has(key)) { matchedAd = adMap.get(key)!; break; }
       }
     }
 
+    // Сохраняем имена (campaign_name, adset_name, ad_name) для удобной связки с фронтом
     updates.push({
       id: lead.id,
-      matched_campaign_id: matchedCampaignId,
-      matched_adset_id: matchedAdsetId,
-      matched_ad_id: matchedAdId,
+      matched_campaign_id: matchedCampaign.name,
+      matched_adset_id: matchedAdset?.name || null,
+      matched_ad_id: matchedAd?.name || null,
     });
     matched++;
   }
