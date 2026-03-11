@@ -5,6 +5,7 @@ import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-or
 import { syncFacebookAccount } from '../services/facebook';
 import { syncBitrix24 } from '../services/bitrix24';
 import { syncAmoCRM } from '../services/amocrm';
+import { matchUtmForClient } from '../services/utm-matcher';
 
 const router = Router();
 
@@ -310,6 +311,15 @@ router.get('/crm/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
       result = await syncBitrix24(conn as any, undefined, sendProgress);
     } else if (conn.type === 'amocrm') {
       result = await syncAmoCRM(conn as any, undefined, sendProgress);
+    }
+
+    // UTM-матчинг после синхронизации CRM
+    sendProgress('UTM-матчинг...', 97);
+    try {
+      const matchResult = await matchUtmForClient(conn.client_id);
+      result = { ...result, matched: matchResult.matched, skipped: matchResult.skipped };
+    } catch (err: any) {
+      console.error('[Sync Stream] UTM matching failed:', err.message);
     }
 
     clearTimeout(timeout);
