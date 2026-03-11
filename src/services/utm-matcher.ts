@@ -10,46 +10,31 @@ function normalize(s: string | null | undefined): string {
 }
 
 /**
- * Возвращает нормализованное множество из всех UTM-значений лида
- */
-function utmSet(lead: {
-  utm_source?: string | null;
-  utm_medium?: string | null;
-  utm_campaign?: string | null;
-  utm_content?: string | null;
-  utm_term?: string | null;
-}): Set<string> {
-  return new Set(
-    [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term]
-      .map(normalize)
-      .filter(Boolean)
-  );
-}
-
-/**
- * UTM-матчинг для клиента.
+ * UTM-матчинг для клиента — POOL-BASED (гибкий) подход.
  *
- * Алгоритм (exact):
- *  1. Берём все нормализованные UTM-значения лида (до 5 штук).
- *  2. Ищем кампанию: normalize(campaign_name) ∈ utmSet → matched_campaign_id
- *  3. Ищем адсет: normalize(adset_name) ∈ utmSet
- *     AND adset принадлежит найденной кампании → matched_adset_id
- *  4. Ищем объявление: normalize(ad_name) ∈ utmSet
- *     AND объявление принадлежит найденному адсету → matched_ad_id
+ * Алгоритм:
+ *   1. Из FB-данных строим «тройки»: {campaign_name, adset_name, ad_name}
+ *   2. Для каждого лида берём пул из всех 5 UTM-значений
+ *   3. Матч = все 3 нормализованных FB-названия присутствуют в UTM-пуле лида
+ *      (неважно, в каком именно utm_* поле находится каждое название)
  *
- * Обновляет только лиды, у которых ещё нет matched_campaign_id
- * (или forceRematching=true).
+ * Преимущество: не зависит от того, в какое UTM-поле рекламодатель записал
+ * campaign_name / adset_name / ad_name — достаточно чтобы все три нашлись
+ * хоть где-то среди 5 UTM-полей.
+ *
+ * Обновляет только лиды без matched_campaign_id (или все при forceRematching=true).
  */
 export async function matchUtmForClient(
   clientId: string,
   forceRematching = false
 ): Promise<{ matched: number; skipped: number }> {
-  // ── 1. Загрузить лиды с UTM ────────────────────────────────────────────────
+
+  // ── 1. Загрузить лиды, у которых есть хоть одно UTM-значение ────────────────
   let leadsQuery = supabase
     .from('crm_leads')
     .select('id, utm_source, utm_medium, utm_campaign, utm_content, utm_term')
     .eq('client_id', clientId)
-    .or('utm_source.not.is.null,utm_medium.not.is.null,utm_campaign.not.is.null,utm_content.not.is.null,utm_term.not.is.null');
+    .or('utm_campaign.not.is.null,utm_content.not.is.null,utm_term.not.is.null,utm_source.not.is.null,utm_medium.not.is.null');
 
   if (!forceRematching) {
     leadsQuery = leadsQuery.is('matched_campaign_id', null);
@@ -61,139 +46,171 @@ export async function matchUtmForClient(
     return { matched: 0, skipped: 0 };
   }
   if (!leads || leads.length === 0) {
-    console.log(`[UTM Matcher] clientId=${clientId}: No leads with UTM tags found (forceRematching=${forceRematching})`);
+    console.log(`[UTM Matcher] clientId=${clientId}: No unmatched leads with UTM found (forceRematching=${forceRematching})`);
     return { matched: 0, skipped: 0 };
   }
 
-  console.log(`[UTM Matcher] clientId=${clientId}: Found ${leads.length} leads with UTM tags`);
-  // Debug: показываем первые 3 лида и их UTM-значения
+  console.log(`[UTM Matcher] clientId=${clientId}: Processing ${leads.length} leads`);
   leads.slice(0, 3).forEach((lead, i) => {
-    console.log(`[UTM Matcher] Lead[${i}] utm_campaign="${lead.utm_campaign}" utm_content="${lead.utm_content}" utm_source="${lead.utm_source}" utm_medium="${lead.utm_medium}" utm_term="${lead.utm_term}"`);
+    console.log(`[UTM Matcher] Lead[${i}] utm_campaign="${lead.utm_campaign}" utm_content="${lead.utm_content}" utm_term="${lead.utm_term}" utm_source="${lead.utm_source}" utm_medium="${lead.utm_medium}"`);
   });
 
-  // ── 2. Загрузить уникальные кампании ─────────────────────────────────────
+  // ── 2. Загрузить campaign_name по campaign_id ────────────────────────────────
   const { data: campaigns } = await supabase
     .from('campaign_stats')
     .select('campaign_id, campaign_name')
     .eq('client_id', clientId);
 
-  const campaignMap = new Map<string, { id: string; name: string }>();
+  const campaignNameMap = new Map<string, string>(); // campaign_id → campaign_name (первое вхождение)
   for (const row of campaigns || []) {
-    const key = normalize(row.campaign_name);
-    if (key && !campaignMap.has(key)) {
-      campaignMap.set(key, { id: row.campaign_id, name: row.campaign_name });
+    if (row.campaign_id && row.campaign_name && !campaignNameMap.has(row.campaign_id)) {
+      campaignNameMap.set(row.campaign_id, row.campaign_name);
     }
   }
+  console.log(`[UTM Matcher] Loaded ${campaignNameMap.size} unique campaigns`);
 
-  console.log(`[UTM Matcher] Found ${campaignMap.size} unique campaigns`);
-  // Debug: показываем первые 5 нормализованных имён кампаний
-  Array.from(campaignMap.keys()).slice(0, 5).forEach(k => {
-    console.log(`[UTM Matcher] Campaign norm="${k}" → "${campaignMap.get(k)?.name}"`);
-  });
-
-  // ── 3. Загрузить уникальные адсеты ────────────────────────────────────────
+  // ── 3. Загрузить adset_name + campaign_id по adset_id ───────────────────────
   const { data: adsets } = await supabase
     .from('adset_stats')
     .select('adset_id, adset_name, campaign_id')
     .eq('client_id', clientId);
 
-  // Ключ: "campaign_id|norm(adset_name)" → { id, name }
-  const adsetMap = new Map<string, { id: string; name: string }>();
+  const adsetMap = new Map<string, { adsetName: string; campaignId: string }>();
   for (const row of adsets || []) {
-    const key = `${row.campaign_id}|${normalize(row.adset_name)}`;
-    if (!adsetMap.has(key)) {
-      adsetMap.set(key, { id: row.adset_id, name: row.adset_name });
+    if (row.adset_id && !adsetMap.has(row.adset_id)) {
+      adsetMap.set(row.adset_id, { adsetName: row.adset_name, campaignId: row.campaign_id });
     }
   }
+  console.log(`[UTM Matcher] Loaded ${adsetMap.size} unique adsets`);
 
-  // ── 4. Загрузить уникальные объявления ───────────────────────────────────
+  // ── 4. Загрузить креативы и построить тройки ─────────────────────────────────
   const { data: creatives } = await supabase
     .from('creative_stats')
-    .select('ad_id, ad_name, adset_id, campaign_id')
+    .select('ad_id, ad_name, adset_id')
     .eq('client_id', clientId);
 
-  // Ключ: "adset_id|norm(ad_name)" → { id, name }
-  const adMap = new Map<string, { id: string; name: string }>();
-  for (const row of creatives || []) {
-    const key = `${row.adset_id}|${normalize(row.ad_name)}`;
-    if (!adMap.has(key)) {
-      adMap.set(key, { id: row.ad_id, name: row.ad_name });
-    }
+  interface FbTriple {
+    campaignName: string;
+    adsetName: string;
+    adName: string;
+    /** Нормализованный пул из трёх FB-названий */
+    normNames: Set<string>;
   }
 
-  // ── 5. Матчинг ────────────────────────────────────────────────────────────
+  const triples: FbTriple[] = [];
+  const tripleKeysSeen = new Set<string>();
+
+  for (const creative of creatives || []) {
+    if (!creative.ad_id || !creative.ad_name) continue;
+
+    const adset = adsetMap.get(creative.adset_id);
+    if (!adset) continue;
+
+    const campaignName = campaignNameMap.get(adset.campaignId);
+    if (!campaignName) continue;
+
+    const tripleKey = `${adset.campaignId}|${creative.adset_id}|${creative.ad_id}`;
+    if (tripleKeysSeen.has(tripleKey)) continue;
+    tripleKeysSeen.add(tripleKey);
+
+    const normCampaign = normalize(campaignName);
+    const normAdset   = normalize(adset.adsetName);
+    const normAd      = normalize(creative.ad_name);
+
+    // Нельзя матчить по пустым названиям
+    if (!normCampaign || !normAdset || !normAd) continue;
+
+    triples.push({
+      campaignName,
+      adsetName: adset.adsetName,
+      adName: creative.ad_name,
+      normNames: new Set([normCampaign, normAdset, normAd]),
+    });
+  }
+
+  console.log(`[UTM Matcher] Built ${triples.length} FB triples (campaign+adset+ad)`);
+  triples.slice(0, 3).forEach((t, i) => {
+    console.log(`[UTM Matcher] Triple[${i}]: campaign="${t.campaignName}" | adset="${t.adsetName}" | ad="${t.adName}"`);
+  });
+
+  if (triples.length === 0) {
+    console.warn('[UTM Matcher] No FB triples found — check that campaign/adset/creative stats are synced for this client');
+    return { matched: 0, skipped: leads.length };
+  }
+
+  // ── 5. Матчинг: пул FB-названий vs пул UTM-значений лида ────────────────────
   let matched = 0;
   let skipped = 0;
-  let noUtmCount = 0;
-  let noCampaignMatchCount = 0;
+  let noUtmValues = 0;
 
-  // IDs лидов → объекты для обновления (используем UPDATE, не upsert)
   const matchedLeads: Array<{
     id: string;
     matched_campaign_id: string;
-    matched_adset_id: string | null;
-    matched_ad_id: string | null;
+    matched_adset_id: string;
+    matched_ad_id: string;
   }> = [];
 
   for (const lead of leads) {
-    const utms = utmSet(lead);
-    if (utms.size === 0) { noUtmCount++; skipped++; continue; }
+    // Строим пул из всех 5 UTM-полей (нормализованные непустые значения)
+    const utmPool = new Set(
+      [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term]
+        .map(v => normalize(v))
+        .filter(v => v !== '')
+    );
 
-    // Найти кампанию
-    let matchedCampaign: { id: string; name: string } | null = null;
-    for (const [normName, camp] of campaignMap) {
-      if (utms.has(normName)) { matchedCampaign = camp; break; }
+    if (utmPool.size === 0) {
+      noUtmValues++;
+      skipped++;
+      continue;
     }
 
-    if (!matchedCampaign) {
-      noCampaignMatchCount++;
+    // Ищем первую тройку, все 3 нормализованных названия которой есть в UTM-пуле
+    let foundTriple: FbTriple | null = null;
+    for (const triple of triples) {
+      let allFound = true;
+      for (const name of triple.normNames) {
+        if (!utmPool.has(name)) {
+          allFound = false;
+          break;
+        }
+      }
+      if (allFound) {
+        foundTriple = triple;
+        break;
+      }
+    }
+
+    if (!foundTriple) {
       skipped++;
-      // Debug первых 2 несматченных лидов
-      if (noCampaignMatchCount <= 2) {
-        console.log(`[UTM Matcher] No campaign match for UTMs: [${Array.from(utms).join(', ')}]`);
-        console.log(`[UTM Matcher] Available campaigns (norm): [${Array.from(campaignMap.keys()).slice(0, 5).join(', ')}]`);
+      if (skipped <= 3) {
+        console.log(`[UTM Matcher] NO MATCH for lead ${lead.id}: UTM pool=[${Array.from(utmPool).join(' | ')}]`);
+        // Показываем ближайшие тройки для диагностики
+        triples.slice(0, 2).forEach(t => {
+          console.log(`[UTM Matcher]   Checked triple: [${Array.from(t.normNames).join(' | ')}]`);
+        });
       }
       continue;
     }
 
-    // Найти адсет внутри кампании (ключ по campaign_id для уникальности)
-    let matchedAdset: { id: string; name: string } | null = null;
-    for (const utm of utms) {
-      const key = `${matchedCampaign.id}|${utm}`;
-      if (adsetMap.has(key)) { matchedAdset = adsetMap.get(key)!; break; }
-    }
-
-    // Найти объявление внутри адсета (ключ по adset_id для уникальности)
-    let matchedAd: { id: string; name: string } | null = null;
-    if (matchedAdset) {
-      for (const utm of utms) {
-        const key = `${matchedAdset.id}|${utm}`;
-        if (adMap.has(key)) { matchedAd = adMap.get(key)!; break; }
-      }
-    }
-
-    // Сохраняем имена (campaign_name, adset_name, ad_name) для удобной связки с фронтом
     matchedLeads.push({
       id: lead.id,
-      matched_campaign_id: matchedCampaign.name,
-      matched_adset_id: matchedAdset?.name || null,
-      matched_ad_id: matchedAd?.name || null,
+      matched_campaign_id: foundTriple.campaignName,
+      matched_adset_id: foundTriple.adsetName,
+      matched_ad_id: foundTriple.adName,
     });
     matched++;
   }
 
-  console.log(`[UTM Matcher] Match results: matched=${matched}, skipped=${skipped} (noUtm=${noUtmCount}, noCampaignMatch=${noCampaignMatchCount})`);
+  console.log(`[UTM Matcher] Results: matched=${matched}, skipped=${skipped} (noUtmValues=${noUtmValues})`);
 
-  // ── 6. Обновить результаты через UPDATE (не upsert, чтобы не нарушать NOT NULL constraints) ──
+  // ── 6. Обновляем через UPDATE батчами по 50 ──────────────────────────────────
   if (matchedLeads.length > 0) {
-    // Обновляем пакетами по 50 через Promise.all для параллельности
     const BATCH = 50;
     let updateErrors = 0;
 
     for (let i = 0; i < matchedLeads.length; i += BATCH) {
       const batch = matchedLeads.slice(i, i + BATCH);
 
-      // Параллельно обновляем все строки в batch
       const results = await Promise.all(
         batch.map(lead =>
           supabase
@@ -210,13 +227,13 @@ export async function matchUtmForClient(
       for (const { error } of results) {
         if (error) {
           updateErrors++;
-          console.error('[UTM Matcher] Update error:', error.message);
+          if (updateErrors <= 3) console.error('[UTM Matcher] Update error:', error.message);
         }
       }
     }
 
     if (updateErrors === 0) {
-      console.log(`[UTM Matcher] Successfully updated ${matchedLeads.length} leads`);
+      console.log(`[UTM Matcher] Successfully updated ${matchedLeads.length} leads in Supabase`);
     } else {
       console.warn(`[UTM Matcher] ${updateErrors} update errors out of ${matchedLeads.length} leads`);
     }
