@@ -3,6 +3,7 @@ import { syncFacebookAccount } from './facebook';
 import { syncGoogleAdsAccount } from './google-ads';
 import { syncAmoCRM } from './amocrm';
 import { syncBitrix24 } from './bitrix24';
+import { matchUtmForClient } from './utm-matcher';
 import { AdAccount, CrmConnection } from '../types/database';
 
 // Default: sync last 30 days on first sync, last 2 days on incremental
@@ -101,6 +102,14 @@ export async function syncSingleCrmConnection(connection: CrmConnection) {
   }
 
   await logSync(connection.client_id, connection.type, 'success', totalRecords, startedAt);
+
+  // UTM-матчинг после синхронизации CRM
+  try {
+    await matchUtmForClient(connection.client_id);
+  } catch (err: any) {
+    console.error('[Sync] UTM matching failed:', err.message);
+  }
+
   return result;
 }
 

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
+import { matchUtmForClient } from '../services/utm-matcher';
 
 const router = Router();
 
@@ -248,6 +249,31 @@ router.get('/sync-status', requireAuth, async (req, res) => {
     .eq('client_id', clientId);
 
   res.json({ logs, adAccounts, crmConnections });
+});
+
+// POST /api/stats/match-utm?clientId=...&force=true
+// Запускает UTM-матчинг вручную для клиента
+router.post('/match-utm', requireAuth, async (req, res) => {
+  const { clientId, force } = req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  try {
+    const result = await matchUtmForClient(clientId, force === 'true');
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
