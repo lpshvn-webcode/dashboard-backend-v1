@@ -60,7 +60,16 @@ export async function matchUtmForClient(
     console.error('[UTM Matcher] Failed to fetch leads:', leadsError.message);
     return { matched: 0, skipped: 0 };
   }
-  if (!leads || leads.length === 0) return { matched: 0, skipped: 0 };
+  if (!leads || leads.length === 0) {
+    console.log(`[UTM Matcher] clientId=${clientId}: No leads with UTM tags found (forceRematching=${forceRematching})`);
+    return { matched: 0, skipped: 0 };
+  }
+
+  console.log(`[UTM Matcher] clientId=${clientId}: Found ${leads.length} leads with UTM tags`);
+  // Debug: показываем первые 3 лида и их UTM-значения
+  leads.slice(0, 3).forEach((lead, i) => {
+    console.log(`[UTM Matcher] Lead[${i}] utm_campaign="${lead.utm_campaign}" utm_content="${lead.utm_content}" utm_source="${lead.utm_source}" utm_medium="${lead.utm_medium}" utm_term="${lead.utm_term}"`);
+  });
 
   // ── 2. Загрузить уникальные кампании ─────────────────────────────────────
   const { data: campaigns } = await supabase
@@ -75,6 +84,12 @@ export async function matchUtmForClient(
       campaignMap.set(key, { id: row.campaign_id, name: row.campaign_name });
     }
   }
+
+  console.log(`[UTM Matcher] Found ${campaignMap.size} unique campaigns`);
+  // Debug: показываем первые 5 нормализованных имён кампаний
+  Array.from(campaignMap.keys()).slice(0, 5).forEach(k => {
+    console.log(`[UTM Matcher] Campaign norm="${k}" → "${campaignMap.get(k)?.name}"`);
+  });
 
   // ── 3. Загрузить уникальные адсеты ────────────────────────────────────────
   const { data: adsets } = await supabase
@@ -109,17 +124,20 @@ export async function matchUtmForClient(
   // ── 5. Матчинг ────────────────────────────────────────────────────────────
   let matched = 0;
   let skipped = 0;
+  let noUtmCount = 0;
+  let noCampaignMatchCount = 0;
 
-  const updates: Array<{
+  // IDs лидов → объекты для обновления (используем UPDATE, не upsert)
+  const matchedLeads: Array<{
     id: string;
-    matched_campaign_id: string | null;
+    matched_campaign_id: string;
     matched_adset_id: string | null;
     matched_ad_id: string | null;
   }> = [];
 
   for (const lead of leads) {
     const utms = utmSet(lead);
-    if (utms.size === 0) { skipped++; continue; }
+    if (utms.size === 0) { noUtmCount++; skipped++; continue; }
 
     // Найти кампанию
     let matchedCampaign: { id: string; name: string } | null = null;
@@ -127,7 +145,16 @@ export async function matchUtmForClient(
       if (utms.has(normName)) { matchedCampaign = camp; break; }
     }
 
-    if (!matchedCampaign) { skipped++; continue; }
+    if (!matchedCampaign) {
+      noCampaignMatchCount++;
+      skipped++;
+      // Debug первых 2 несматченных лидов
+      if (noCampaignMatchCount <= 2) {
+        console.log(`[UTM Matcher] No campaign match for UTMs: [${Array.from(utms).join(', ')}]`);
+        console.log(`[UTM Matcher] Available campaigns (norm): [${Array.from(campaignMap.keys()).slice(0, 5).join(', ')}]`);
+      }
+      continue;
+    }
 
     // Найти адсет внутри кампании (ключ по campaign_id для уникальности)
     let matchedAdset: { id: string; name: string } | null = null;
@@ -146,7 +173,7 @@ export async function matchUtmForClient(
     }
 
     // Сохраняем имена (campaign_name, adset_name, ad_name) для удобной связки с фронтом
-    updates.push({
+    matchedLeads.push({
       id: lead.id,
       matched_campaign_id: matchedCampaign.name,
       matched_adset_id: matchedAdset?.name || null,
@@ -155,21 +182,45 @@ export async function matchUtmForClient(
     matched++;
   }
 
-  // ── 6. Сохранить результаты пакетом ───────────────────────────────────────
-  if (updates.length > 0) {
-    // Upsert пакетами по 500
-    const BATCH = 500;
-    for (let i = 0; i < updates.length; i += BATCH) {
-      const batch = updates.slice(i, i + BATCH);
-      const { error } = await supabase
-        .from('crm_leads')
-        .upsert(batch, { onConflict: 'id' });
-      if (error) {
-        console.error('[UTM Matcher] Upsert error:', error.message);
+  console.log(`[UTM Matcher] Match results: matched=${matched}, skipped=${skipped} (noUtm=${noUtmCount}, noCampaignMatch=${noCampaignMatchCount})`);
+
+  // ── 6. Обновить результаты через UPDATE (не upsert, чтобы не нарушать NOT NULL constraints) ──
+  if (matchedLeads.length > 0) {
+    // Обновляем пакетами по 50 через Promise.all для параллельности
+    const BATCH = 50;
+    let updateErrors = 0;
+
+    for (let i = 0; i < matchedLeads.length; i += BATCH) {
+      const batch = matchedLeads.slice(i, i + BATCH);
+
+      // Параллельно обновляем все строки в batch
+      const results = await Promise.all(
+        batch.map(lead =>
+          supabase
+            .from('crm_leads')
+            .update({
+              matched_campaign_id: lead.matched_campaign_id,
+              matched_adset_id: lead.matched_adset_id,
+              matched_ad_id: lead.matched_ad_id,
+            })
+            .eq('id', lead.id)
+        )
+      );
+
+      for (const { error } of results) {
+        if (error) {
+          updateErrors++;
+          console.error('[UTM Matcher] Update error:', error.message);
+        }
       }
+    }
+
+    if (updateErrors === 0) {
+      console.log(`[UTM Matcher] Successfully updated ${matchedLeads.length} leads`);
+    } else {
+      console.warn(`[UTM Matcher] ${updateErrors} update errors out of ${matchedLeads.length} leads`);
     }
   }
 
-  console.log(`[UTM Matcher] clientId=${clientId}: matched=${matched}, skipped=${skipped}`);
   return { matched, skipped };
 }
