@@ -251,6 +251,90 @@ router.get('/sync-status', requireAuth, async (req, res) => {
   res.json({ logs, adAccounts, crmConnections });
 });
 
+// GET /api/stats/debug-utm?clientId=...
+// Диагностика UTM-матчинга: показывает состояние лидов и кампаний
+router.get('/debug-utm', requireAuth, async (req, res) => {
+  const { clientId } = req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  // Всего лидов
+  const { count: totalLeads } = await supabase
+    .from('crm_leads')
+    .select('*', { count: 'exact', head: true })
+    .eq('client_id', clientId);
+
+  // Лиды с хоть одной UTM-меткой
+  const { count: leadsWithUtm } = await supabase
+    .from('crm_leads')
+    .select('*', { count: 'exact', head: true })
+    .eq('client_id', clientId)
+    .or('utm_source.not.is.null,utm_medium.not.is.null,utm_campaign.not.is.null,utm_content.not.is.null,utm_term.not.is.null');
+
+  // Лиды с успешным матчингом
+  const { count: matchedLeads } = await supabase
+    .from('crm_leads')
+    .select('*', { count: 'exact', head: true })
+    .eq('client_id', clientId)
+    .not('matched_campaign_id', 'is', null);
+
+  // Примеры лидов с UTM
+  const { data: sampleLeads, error: sampleError } = await supabase
+    .from('crm_leads')
+    .select('id, name, utm_source, utm_medium, utm_campaign, utm_content, utm_term, matched_campaign_id')
+    .eq('client_id', clientId)
+    .or('utm_campaign.not.is.null,utm_source.not.is.null,utm_content.not.is.null')
+    .limit(5);
+
+  // Первые лиды БЕЗ UTM (для понимания проблемы)
+  const { data: leadsNoUtm } = await supabase
+    .from('crm_leads')
+    .select('id, name, utm_source, utm_medium, utm_campaign, utm_content, utm_term')
+    .eq('client_id', clientId)
+    .is('utm_campaign', null)
+    .is('utm_source', null)
+    .limit(3);
+
+  // Уникальные имена кампаний из campaign_stats
+  const { data: campaigns } = await supabase
+    .from('campaign_stats')
+    .select('campaign_name')
+    .eq('client_id', clientId)
+    .limit(50);
+
+  const uniqueCampaignNames = [...new Set((campaigns || []).map((c: any) => c.campaign_name))];
+
+  let diagnosis = '';
+  if ((leadsWithUtm || 0) === 0) {
+    diagnosis = 'PROBLEM: CRM leads have NO UTM tags. Check that landing pages pass utm_* params to the CRM.';
+  } else if ((matchedLeads || 0) === 0) {
+    diagnosis = 'PROBLEM: Leads have UTM tags but no campaign name matches. Compare sampleLeadsWithUtm.utm_campaign vs sampleCampaignNames.';
+  } else {
+    diagnosis = `OK: ${matchedLeads} leads matched to campaigns.`;
+  }
+
+  res.json({
+    totalLeads: totalLeads || 0,
+    leadsWithUtm: leadsWithUtm || 0,
+    matchedLeads: matchedLeads || 0,
+    diagnosis,
+    sampleLeadsWithUtm: sampleLeads || [],
+    sampleLeadsWithoutUtm: leadsNoUtm || [],
+    sampleCampaignNames: uniqueCampaignNames,
+    sampleError: sampleError?.message,
+  });
+});
+
 // POST /api/stats/match-utm?clientId=...&force=true
 // Запускает UTM-матчинг вручную для клиента
 router.post('/match-utm', requireAuth, async (req, res) => {
