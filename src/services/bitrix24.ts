@@ -126,9 +126,15 @@ async function fetchAllPages<T>(
       if (start >= total) break;
       retries = 0;
     } catch (error: any) {
-      if (error.response?.status === 429) {
-        const waitTime = Math.min(1000 * Math.pow(2, retries), 10000);
-        console.warn(`[Bitrix24] Rate limited on ${method}, waiting ${waitTime}ms`);
+      const status = error.response?.status;
+      const bxError = error.response?.data?.error;
+      const isRateLimit =
+        status === 429 ||
+        (status === 503 && bxError === 'QUERY_LIMIT_EXCEEDED');
+
+      if (isRateLimit) {
+        const waitTime = Math.min(1000 * Math.pow(2, retries), 16000);
+        console.warn(`[Bitrix24] Rate limited on ${method} (${status}), waiting ${waitTime}ms`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         retries++;
         if (retries >= MAX_RETRIES) {
@@ -163,22 +169,57 @@ async function fetchContactPhones(
   const phoneMap: Record<string, string> = {};
   if (contactIds.length === 0) return phoneMap;
 
-  // Bitrix24 list endpoints return max 50 per page; batch by 50
-  for (let i = 0; i < contactIds.length; i += 50) {
-    const batch = contactIds.slice(i, i + 50);
-    const res = await axios.get(`${baseUrl}/crm.contact.list`, {
-      params: {
-        ...authParams,
-        SELECT: ['ID', 'PHONE'],
-        FILTER: { ID: batch },
-      },
-    });
+  // Bitrix24 rate-limit: 2 req/s per user → batch by 50, delay between batches
+  const BATCH_SIZE = 50;
+  const BATCH_DELAY_MS = 600; // ~1.6 req/s — safe margin under the 2 req/s limit
+  const MAX_RETRIES = 5;
 
-    for (const contact of res.data.result || []) {
-      const phoneValue = contact.PHONE?.[0]?.VALUE;
-      if (phoneValue) {
-        phoneMap[contact.ID] = normalizePhone(phoneValue) as string;
+  for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
+    const batch = contactIds.slice(i, i + BATCH_SIZE);
+    let retries = 0;
+
+    while (true) {
+      try {
+        const res = await axios.get(`${baseUrl}/crm.contact.list`, {
+          params: {
+            ...authParams,
+            SELECT: ['ID', 'PHONE'],
+            FILTER: { ID: batch },
+          },
+          timeout: 30000,
+        });
+
+        for (const contact of res.data.result || []) {
+          const phoneValue = contact.PHONE?.[0]?.VALUE;
+          if (phoneValue) {
+            phoneMap[contact.ID] = normalizePhone(phoneValue) as string;
+          }
+        }
+        break; // success — exit retry loop
+      } catch (err: any) {
+        const status = err.response?.status;
+        const bxError = err.response?.data?.error;
+        const isRateLimit =
+          status === 429 ||
+          (status === 503 && bxError === 'QUERY_LIMIT_EXCEEDED');
+
+        if (isRateLimit && retries < MAX_RETRIES) {
+          const waitMs = Math.min(1000 * Math.pow(2, retries), 16000);
+          console.warn(`[Bitrix24] Rate limit on crm.contact.list (attempt ${retries + 1}), waiting ${waitMs}ms`);
+          await new Promise(resolve => setTimeout(resolve, waitMs));
+          retries++;
+          continue;
+        }
+
+        // Non-retriable error — log and skip this batch, don't crash entire sync
+        console.error(`[Bitrix24] fetchContactPhones error (batch ${i}–${i + batch.length}):`, err.message);
+        break;
       }
+    }
+
+    // Throttle between batches to avoid hitting Bitrix24 rate limits
+    if (i + BATCH_SIZE < contactIds.length) {
+      await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
     }
   }
 
