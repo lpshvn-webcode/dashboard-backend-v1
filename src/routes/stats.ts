@@ -122,20 +122,35 @@ router.get('/leads', requireAuth, async (req, res) => {
 
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
-  let query = supabase
-    .from('crm_leads')
-    .select('*')
-    .eq('client_id', clientId)
-    .order('created_at_crm', { ascending: false });
+  // Paginate to avoid Supabase 1000-row default limit.
+  // Exclude duplicates (is_duplicate=true) — they should not appear in dashboard.
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let page = 0;
 
-  if (dateFrom) query = query.gte('created_at_crm', dateFrom);
-  if (dateTo) query = query.lte('created_at_crm', dateTo + 'T23:59:59');
-  if (crmType) query = query.eq('crm_type', crmType);
+  while (true) {
+    let q = supabase
+      .from('crm_leads')
+      .select('*')
+      .eq('client_id', clientId)
+      .eq('is_duplicate', false)
+      .order('created_at_crm', { ascending: false })
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+    if (dateFrom) q = q.gte('created_at_crm', dateFrom);
+    if (dateTo) q = q.lte('created_at_crm', dateTo + 'T23:59:59');
+    if (crmType) q = q.eq('crm_type', crmType);
 
-  res.json({ data });
+    const { data: batch, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    if (!batch || batch.length === 0) break;
+
+    allRows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    page++;
+  }
+
+  res.json({ data: allRows });
 });
 
 // GET /api/stats/overview?clientId=...&dateFrom=...&dateTo=...
