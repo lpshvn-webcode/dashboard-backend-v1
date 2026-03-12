@@ -326,7 +326,8 @@ router.get('/crm/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
     // server-side matching must complete so Supabase data is up to date.
     sendProgress('UTM-матчинг...', 97);
     try {
-      const matchResult = await matchUtmForClient(conn.client_id);
+      // forceRematching=true — пересчитать ВСЕ лиды с нуля (очищает старые матчи)
+      const matchResult = await matchUtmForClient(conn.client_id, true);
       console.log(`[Sync Stream] UTM matching done: matched=${matchResult.matched}, skipped=${matchResult.skipped}`);
       result = { ...result, matched: matchResult.matched, skipped: matchResult.skipped };
     } catch (err: any) {

@@ -14,6 +14,23 @@ function normalize(s: string | null | undefined): string {
 }
 
 /**
+ * Bitrix24 записывает буквальные названия UTM-полей как значения
+ * (например utm_source="utm_source"), когда реальные UTM не заполнены.
+ * Фильтруем эти placeholder-ы.
+ */
+const UTM_PLACEHOLDER_VALUES = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
+  'utm source', 'utm medium', 'utm campaign', 'utm content', 'utm term',
+]);
+
+function isPlaceholderUtm(value: string | null | undefined): boolean {
+  if (!value) return true;
+  const trimmed = value.trim();
+  if (trimmed === '') return true;
+  return UTM_PLACEHOLDER_VALUES.has(trimmed.toLowerCase());
+}
+
+/**
  * UTM-матчинг для клиента — POOL-BASED (гибкий) подход.
  *
  * Алгоритм:
@@ -33,9 +50,8 @@ export async function matchUtmForClient(
   forceRematching = false
 ): Promise<{ matched: number; skipped: number }> {
 
-  // ── 1. Загрузить ВСЕ лиды клиента с хотя бы одним непустым UTM-значением ────
+  // ── 1. Загрузить ВСЕ лиды клиента ────────────────────────────────────────────
   // Supabase по умолчанию возвращает 1000 строк — используем пагинацию.
-  // Bitrix24 хранит пустые UTM как "" (не NULL), поэтому фильтруем в JS.
   const PAGE_SIZE = 1000;
   let allLeads: any[] = [];
   let page = 0;
@@ -63,16 +79,17 @@ export async function matchUtmForClient(
     page++;
   }
 
-  // Фильтруем: оставляем только лиды с хотя бы одним НЕПУСТЫМ UTM-значением
+  // Фильтруем: оставляем лиды с хотя бы одним РЕАЛЬНЫМ (не placeholder) UTM
   const leads = allLeads.filter((lead: any) => {
-    return [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term]
-      .some(v => v != null && v.trim() !== '');
+    const values = [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term];
+    return values.some(v => !isPlaceholderUtm(v));
   });
 
-  console.log(`[UTM Matcher] clientId=${clientId}: Loaded ${allLeads.length} total rows, ${leads.length} with non-empty UTM (forceRematching=${forceRematching})`);
+  const placeholderCount = allLeads.length - leads.length;
+  console.log(`[UTM Matcher] clientId=${clientId}: Loaded ${allLeads.length} total rows, ${leads.length} with real UTM, ${placeholderCount} placeholder-only (forceRematching=${forceRematching})`);
 
   if (leads.length === 0) {
-    console.log(`[UTM Matcher] clientId=${clientId}: No leads with UTM values found`);
+    console.log(`[UTM Matcher] clientId=${clientId}: No leads with real UTM values found`);
     return { matched: 0, skipped: 0 };
   }
 
@@ -118,12 +135,15 @@ export async function matchUtmForClient(
     campaignName: string;
     adsetName: string;
     adName: string;
-    /** Нормализованный пул из трёх FB-названий */
-    normNames: Set<string>;
+    /** Нормализованные FB-названия (массив, для точного сравнения 3-х элементов) */
+    normNames: string[];
+    /** Set для быстрого lookup */
+    normNamesSet: Set<string>;
   }
 
   const triples: FbTriple[] = [];
   const tripleKeysSeen = new Set<string>();
+  let skippedPromo = 0;
 
   for (const creative of creatives || []) {
     if (!creative.ad_id || !creative.ad_name) continue;
@@ -145,17 +165,28 @@ export async function matchUtmForClient(
     // Нельзя матчить по пустым названиям
     if (!normCampaign || !normAdset || !normAd) continue;
 
+    const normNamesSet = new Set([normCampaign, normAdset, normAd]);
+
+    // Пропускаем тройки, где все 3 названия совпадают (promo/boost посты).
+    // Set дедуплицирует их в 1 элемент, что даёт ложные матчи.
+    // Требуем минимум 2 уникальных названия для надёжного матчинга.
+    if (normNamesSet.size < 2) {
+      skippedPromo++;
+      continue;
+    }
+
     triples.push({
       campaignName,
       adsetName: adset.adsetName,
       adName: creative.ad_name,
-      normNames: new Set([normCampaign, normAdset, normAd]),
+      normNames: [normCampaign, normAdset, normAd],
+      normNamesSet,
     });
   }
 
-  console.log(`[UTM Matcher] Built ${triples.length} FB triples (campaign+adset+ad)`);
+  console.log(`[UTM Matcher] Built ${triples.length} FB triples (campaign+adset+ad), skipped ${skippedPromo} promo/boost triples`);
   triples.forEach((t: FbTriple, i: number) => {
-    console.log(`[UTM Matcher] Triple[${i}]: campaign="${t.campaignName}" | adset="${t.adsetName}" | ad="${t.adName}" | normalized=[${Array.from(t.normNames).join(' | ')}]`);
+    console.log(`[UTM Matcher] Triple[${i}]: campaign="${t.campaignName}" | adset="${t.adsetName}" | ad="${t.adName}" | uniqueNames=${t.normNamesSet.size} | normalized=[${t.normNames.join(' | ')}]`);
   });
 
   if (triples.length === 0) {
@@ -168,6 +199,26 @@ export async function matchUtmForClient(
   let skipped = 0;
   let noUtmValues = 0;
 
+  // При forceRematching — сначала очищаем старые матчи, чтобы не было остатков
+  if (forceRematching) {
+    console.log(`[UTM Matcher] Force rematching: clearing old matched_* fields...`);
+    const { error: clearError } = await supabase
+      .from('crm_leads')
+      .update({
+        matched_campaign_id: null,
+        matched_adset_id: null,
+        matched_ad_id: null,
+      })
+      .eq('client_id', clientId)
+      .not('matched_campaign_id', 'is', null);
+
+    if (clearError) {
+      console.error('[UTM Matcher] Failed to clear old matches:', clearError.message);
+    } else {
+      console.log('[UTM Matcher] Old matches cleared');
+    }
+  }
+
   const matchedLeads: Array<{
     id: string;
     matched_campaign_id: string;
@@ -176,9 +227,11 @@ export async function matchUtmForClient(
   }> = [];
 
   for (const lead of leads) {
-    // Строим пул из всех 5 UTM-полей (нормализованные непустые значения)
+    // Строим пул из всех 5 UTM-полей (нормализованные, без placeholder-ов)
+    const utmValues = [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term];
     const utmPool = new Set(
-      [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term]
+      utmValues
+        .filter(v => !isPlaceholderUtm(v))
         .map(v => normalize(v))
         .filter(v => v !== '')
     );
@@ -189,11 +242,11 @@ export async function matchUtmForClient(
       continue;
     }
 
-    // Ищем первую тройку, все 3 нормализованных названия которой есть в UTM-пуле
+    // Ищем первую тройку, все уникальные нормализованные названия которой есть в UTM-пуле
     let foundTriple: FbTriple | null = null;
     for (const triple of triples) {
       let allFound = true;
-      for (const name of triple.normNames) {
+      for (const name of triple.normNamesSet) {
         if (!utmPool.has(name)) {
           allFound = false;
           break;
@@ -219,7 +272,7 @@ export async function matchUtmForClient(
     console.log(`[UTM Matcher]   UTM fields: source="${lead.utm_source || ''}" | medium="${lead.utm_medium || ''}" | campaign="${lead.utm_campaign || ''}" | content="${lead.utm_content || ''}" | term="${lead.utm_term || ''}"`);
     console.log(`[UTM Matcher]   UTM pool (normalized): [${Array.from(utmPool).join(' | ')}]`);
     console.log(`[UTM Matcher]   FB triple: campaign="${foundTriple.campaignName}" | adset="${foundTriple.adsetName}" | ad="${foundTriple.adName}"`);
-    console.log(`[UTM Matcher]   FB pool (normalized): [${Array.from(foundTriple.normNames).join(' | ')}]`);
+    console.log(`[UTM Matcher]   FB pool (normalized): [${foundTriple.normNames.join(' | ')}] (unique=${foundTriple.normNamesSet.size})`);
 
     matchedLeads.push({
       id: lead.id,
