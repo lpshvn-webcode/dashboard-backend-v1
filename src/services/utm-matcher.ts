@@ -51,7 +51,7 @@ export async function matchUtmForClient(
   }
 
   console.log(`[UTM Matcher] clientId=${clientId}: Processing ${leads.length} leads`);
-  leads.slice(0, 3).forEach((lead, i) => {
+  leads.slice(0, 3).forEach((lead: any, i: number) => {
     console.log(`[UTM Matcher] Lead[${i}] utm_campaign="${lead.utm_campaign}" utm_content="${lead.utm_content}" utm_term="${lead.utm_term}" utm_source="${lead.utm_source}" utm_medium="${lead.utm_medium}"`);
   });
 
