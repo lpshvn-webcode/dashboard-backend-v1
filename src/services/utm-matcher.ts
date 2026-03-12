@@ -29,28 +29,49 @@ export async function matchUtmForClient(
   forceRematching = false
 ): Promise<{ matched: number; skipped: number }> {
 
-  // ── 1. Загрузить лиды, у которых есть хоть одно UTM-значение ────────────────
-  let leadsQuery = supabase
-    .from('crm_leads')
-    .select('id, utm_source, utm_medium, utm_campaign, utm_content, utm_term')
-    .eq('client_id', clientId)
-    .or('utm_campaign.not.is.null,utm_content.not.is.null,utm_term.not.is.null,utm_source.not.is.null,utm_medium.not.is.null');
+  // ── 1. Загрузить ВСЕ лиды клиента с хотя бы одним непустым UTM-значением ────
+  // Supabase по умолчанию возвращает 1000 строк — используем пагинацию.
+  // Bitrix24 хранит пустые UTM как "" (не NULL), поэтому фильтруем в JS.
+  const PAGE_SIZE = 1000;
+  let allLeads: any[] = [];
+  let page = 0;
 
-  if (!forceRematching) {
-    leadsQuery = leadsQuery.is('matched_campaign_id', null);
+  while (true) {
+    let q = supabase
+      .from('crm_leads')
+      .select('id, utm_source, utm_medium, utm_campaign, utm_content, utm_term')
+      .eq('client_id', clientId)
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+
+    if (!forceRematching) {
+      q = q.is('matched_campaign_id', null);
+    }
+
+    const { data: batch, error: batchError } = await q;
+    if (batchError) {
+      console.error('[UTM Matcher] Failed to fetch leads page:', batchError.message);
+      return { matched: 0, skipped: 0 };
+    }
+    if (!batch || batch.length === 0) break;
+
+    allLeads.push(...batch);
+    if (batch.length < PAGE_SIZE) break; // последняя страница
+    page++;
   }
 
-  const { data: leads, error: leadsError } = await leadsQuery;
-  if (leadsError) {
-    console.error('[UTM Matcher] Failed to fetch leads:', leadsError.message);
+  // Фильтруем: оставляем только лиды с хотя бы одним НЕПУСТЫМ UTM-значением
+  const leads = allLeads.filter((lead: any) => {
+    return [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term]
+      .some(v => v != null && v.trim() !== '');
+  });
+
+  console.log(`[UTM Matcher] clientId=${clientId}: Loaded ${allLeads.length} total rows, ${leads.length} with non-empty UTM (forceRematching=${forceRematching})`);
+
+  if (leads.length === 0) {
+    console.log(`[UTM Matcher] clientId=${clientId}: No leads with UTM values found`);
     return { matched: 0, skipped: 0 };
   }
-  if (!leads || leads.length === 0) {
-    console.log(`[UTM Matcher] clientId=${clientId}: No unmatched leads with UTM found (forceRematching=${forceRematching})`);
-    return { matched: 0, skipped: 0 };
-  }
 
-  console.log(`[UTM Matcher] clientId=${clientId}: Processing ${leads.length} leads`);
   leads.slice(0, 3).forEach((lead: any, i: number) => {
     console.log(`[UTM Matcher] Lead[${i}] utm_campaign="${lead.utm_campaign}" utm_content="${lead.utm_content}" utm_term="${lead.utm_term}" utm_source="${lead.utm_source}" utm_medium="${lead.utm_medium}"`);
   });
