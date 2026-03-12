@@ -1,12 +1,16 @@
+import he from 'he';
 import { supabase } from '../lib/supabase';
 
 /**
  * Нормализация строки для сравнения:
- * lowercase + пробелы/дефисы/подчёркивания → один пробел + trim
+ * 1. Декодирует HTML-сущности (Bitrix24 возвращает "&mdash;" вместо "—")
+ * 2. lowercase
+ * 3. пробелы/дефисы/тире/подчёркивания → один пробел + trim
  */
 function normalize(s: string | null | undefined): string {
   if (!s) return '';
-  return s.toLowerCase().replace(/[\s\-_]+/g, ' ').trim();
+  const decoded = he.decode(s);
+  return decoded.toLowerCase().replace(/[\s\-\u2013\u2014_]+/g, ' ').trim();
 }
 
 /**

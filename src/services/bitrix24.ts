@@ -1,7 +1,16 @@
 import axios from 'axios';
+import he from 'he';
 import { supabase } from '../lib/supabase';
 import { CrmConnection, CrmLead, CrmSyncType } from '../types/database';
 import { normalizePhone } from '../utils/phone';
+
+/** Decode HTML entities from Bitrix24 response (e.g. "&mdash;" → "—") */
+function decodeHtml(s: string): string;
+function decodeHtml(s: string | undefined | null): string | undefined;
+function decodeHtml(s: string | undefined | null): string | undefined {
+  if (!s) return undefined;
+  return he.decode(s);
+}
 
 async function refreshBitrixToken(connection: CrmConnection): Promise<string> {
   const response = await axios.get('https://oauth.bitrix.info/oauth/token/', {
@@ -301,7 +310,7 @@ export async function syncBitrix24(
         client_id: connection.client_id,
         crm_type: 'bitrix24',
         lead_id: `L_${item.ID}`,          // prefix to avoid ID collision with deals
-        lead_name: item.TITLE,
+        lead_name: decodeHtml(item.TITLE),
         status: item.STATUS_ID,
         responsible_name: item.ASSIGNED_BY_NAME,
         created_at_crm: new Date(item.DATE_CREATE).toISOString(),
@@ -311,11 +320,11 @@ export async function syncBitrix24(
         phone,
         record_type: 'lead',
         is_duplicate: false,
-        utm_source: item.UTM_SOURCE,
-        utm_medium: item.UTM_MEDIUM,
-        utm_campaign: item.UTM_CAMPAIGN,
-        utm_content: item.UTM_CONTENT,
-        utm_term: item.UTM_TERM,
+        utm_source: decodeHtml(item.UTM_SOURCE),
+        utm_medium: decodeHtml(item.UTM_MEDIUM),
+        utm_campaign: decodeHtml(item.UTM_CAMPAIGN),
+        utm_content: decodeHtml(item.UTM_CONTENT),
+        utm_term: decodeHtml(item.UTM_TERM),
         created_at: '',
       });
     }
@@ -363,7 +372,7 @@ export async function syncBitrix24(
         client_id: connection.client_id,
         crm_type: 'bitrix24',
         lead_id: `D_${item.ID}`,          // prefix to avoid ID collision with leads
-        lead_name: item.TITLE,
+        lead_name: decodeHtml(item.TITLE),
         status: item.STAGE_ID,
         responsible_name: item.ASSIGNED_BY_NAME,
         created_at_crm: new Date(item.DATE_CREATE).toISOString(),
@@ -373,11 +382,11 @@ export async function syncBitrix24(
         phone,
         record_type: 'deal',
         is_duplicate: false,
-        utm_source: item.UTM_SOURCE,
-        utm_medium: item.UTM_MEDIUM,
-        utm_campaign: item.UTM_CAMPAIGN,
-        utm_content: item.UTM_CONTENT,
-        utm_term: item.UTM_TERM,
+        utm_source: decodeHtml(item.UTM_SOURCE),
+        utm_medium: decodeHtml(item.UTM_MEDIUM),
+        utm_campaign: decodeHtml(item.UTM_CAMPAIGN),
+        utm_content: decodeHtml(item.UTM_CONTENT),
+        utm_term: decodeHtml(item.UTM_TERM),
         created_at: '',
       });
     }
