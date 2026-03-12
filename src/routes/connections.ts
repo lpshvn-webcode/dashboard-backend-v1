@@ -283,29 +283,37 @@ router.get('/crm/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
     res.end();
   }, SYNC_STREAM_TIMEOUT_MS);
 
+  // sendProgress is safe: never throws even if the client closed the SSE connection early.
+  // syncBitrix24 sends progress=100 internally (step "Завершение..."), which may cause
+  // the frontend to close the EventSource — after that res.write() would throw EPIPE.
+  // Wrapping prevents that error from bubbling up and skipping the UTM matching step.
   const sendProgress = (step: string, progress: number) => {
-    res.write(`data: ${JSON.stringify({ step, progress, timestamp: Date.now() })}\n\n`);
+    if (res.writableEnded) return;
+    try {
+      res.write(`data: ${JSON.stringify({ step, progress, timestamp: Date.now() })}\n\n`);
+    } catch (_) { /* client disconnected — ignore, server-side work must continue */ }
   };
 
+  // Validate connection and permissions before starting sync
+  const { data: conn } = await supabase
+    .from('crm_connections').select('*').eq('id', req.params.id).single();
+
+  if (!conn) {
+    clearTimeout(timeout);
+    res.write(`data: ${JSON.stringify({ error: 'Connection not found', step: 'Ошибка', progress: 0 })}\n\n`);
+    return res.end();
+  }
+
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
+
+  if (!client) {
+    clearTimeout(timeout);
+    res.write(`data: ${JSON.stringify({ error: 'Access denied', step: 'Ошибка', progress: 0 })}\n\n`);
+    return res.end();
+  }
+
   try {
-    const { data: conn } = await supabase
-      .from('crm_connections').select('*').eq('id', req.params.id).single();
-
-    if (!conn) {
-      clearTimeout(timeout);
-      res.write(`data: ${JSON.stringify({ error: 'Connection not found', step: 'Ошибка', progress: 0 })}\n\n`);
-      return res.end();
-    }
-
-    const { data: client } = await supabase
-      .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
-
-    if (!client) {
-      clearTimeout(timeout);
-      res.write(`data: ${JSON.stringify({ error: 'Access denied', step: 'Ошибка', progress: 0 })}\n\n`);
-      return res.end();
-    }
-
     let result: any;
     if (conn.type === 'bitrix24') {
       result = await syncBitrix24(conn as any, undefined, sendProgress);
@@ -313,23 +321,31 @@ router.get('/crm/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
       result = await syncAmoCRM(conn as any, undefined, sendProgress);
     }
 
-    // UTM-матчинг после синхронизации CRM
+    // UTM-матчинг после синхронизации CRM.
+    // Runs unconditionally — even if frontend already closed the SSE connection,
+    // server-side matching must complete so Supabase data is up to date.
     sendProgress('UTM-матчинг...', 97);
     try {
       const matchResult = await matchUtmForClient(conn.client_id);
+      console.log(`[Sync Stream] UTM matching done: matched=${matchResult.matched}, skipped=${matchResult.skipped}`);
       result = { ...result, matched: matchResult.matched, skipped: matchResult.skipped };
     } catch (err: any) {
       console.error('[Sync Stream] UTM matching failed:', err.message);
     }
 
     clearTimeout(timeout);
-    res.write(`data: ${JSON.stringify({ step: 'Завершено', progress: 100, done: true, result })}\n\n`);
-    res.end();
+    sendProgress('Завершено', 100);
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ step: 'Завершено', progress: 100, done: true, result })}\n\n`);
+      res.end();
+    }
   } catch (error: any) {
     clearTimeout(timeout);
     console.error('[Sync Stream] Error:', error);
-    res.write(`data: ${JSON.stringify({ error: error.message || 'Ошибка синхронизации', step: 'Ошибка', progress: 0 })}\n\n`);
-    res.end();
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ error: error.message || 'Ошибка синхронизации', step: 'Ошибка', progress: 0 })}\n\n`);
+      res.end();
+    }
   }
 });
 
