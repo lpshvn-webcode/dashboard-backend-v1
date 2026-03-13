@@ -71,6 +71,11 @@ export async function syncFacebookAccount(
   const timeRange = JSON.stringify({ since: dateRange.since, until: dateRange.until });
   const actId = `act_${account.account_id}`;
 
+  // time_increment=1 → daily breakdown (one row per day per ad/adset/campaign).
+  // Without this FB returns a single aggregated row for the entire period, which
+  // breaks cross_analytics date filtering and makes all spend appear as 0.
+  const timeRangeJson = JSON.stringify(dateRange);
+
   progress('Подключение к Facebook Ads...', 5);
 
   try {
@@ -78,7 +83,7 @@ export async function syncFacebookAccount(
     progress('Загрузка кампаний...', 15);
     const campaignsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
-      fields: `id,name,status,effective_status,insights.time_range(${JSON.stringify(dateRange)}){${insightFields},date_start}`,
+      fields: `id,name,status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
       limit: '200',
     });
@@ -131,7 +136,7 @@ export async function syncFacebookAccount(
     progress('Загрузка групп объявлений...', 45);
     const adsetsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/adsets`, {
       access_token: account.access_token,
-      fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${JSON.stringify(dateRange)}){${insightFields},date_start}`,
+      fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
       limit: '500',
     });
@@ -188,7 +193,7 @@ export async function syncFacebookAccount(
     progress('Загрузка объявлений...', 72);
     const adsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/ads`, {
       access_token: account.access_token,
-      fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${JSON.stringify(dateRange)}){${insightFields},date_start}`,
+      fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
       limit: '500',
     });
