@@ -149,14 +149,11 @@ router.get('/ad-accounts/:id/sync-stream', requireAuthFromQuery, async (req, res
       return res.end();
     }
 
-    // Determine date range (same logic as sync-orchestrator)
+    // Manual sync always covers the last 90 days (full re-pull with daily breakdown).
+    // This ensures cross_analytics has complete data regardless of last_synced_at.
     const until = new Date();
     const since = new Date();
-    if (account.last_synced_at) {
-      since.setDate(since.getDate() - 2);
-    } else {
-      since.setDate(since.getDate() - 30);
-    }
+    since.setDate(since.getDate() - 90);
     const dateRange = {
       since: since.toISOString().split('T')[0],
       until: until.toISOString().split('T')[0],
@@ -168,7 +165,19 @@ router.get('/ad-accounts/:id/sync-stream', requireAuthFromQuery, async (req, res
     } else {
       // Google / other: fallback without progress
       sendProgress('Синхронизация...', 50);
-      result = await syncAllAdsAccounts(account.client_id);
+      result = await syncAllAdsAccounts(account.client_id, 90);
+    }
+
+    // Rebuild cross-analytics after manual ad sync
+    sendProgress('Сквозная аналитика...', 95);
+    try {
+      const crossResult = await buildCrossAnalytics(account.client_id, {
+        dateFrom: dateRange.since,
+        dateTo: dateRange.until,
+      });
+      console.log(`[Ad Sync Stream] Cross-analytics built: rows=${crossResult.rowsUpserted}, leads=${crossResult.leadsAttributed}`);
+    } catch (err: any) {
+      console.error('[Ad Sync Stream] Cross-analytics build failed:', err.message);
     }
 
     clearTimeout(timeout);

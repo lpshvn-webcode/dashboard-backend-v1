@@ -7,17 +7,21 @@ import { matchUtmForClient } from './utm-matcher';
 import { buildCrossAnalytics } from './cross-analytics-builder';
 import { AdAccount, CrmConnection } from '../types/database';
 
-// Default: sync last 30 days on first sync, last 2 days on incremental
-function getDateRange(lastSynced?: string | null): { since: string; until: string } {
+// Default: sync last 90 days on first sync, last 5 days on incremental.
+// Pass daysBack to override (e.g. 5 for nightly cron, 90 for manual button).
+function getDateRange(lastSynced?: string | null, daysBack?: number): { since: string; until: string } {
   const until = new Date();
   const since = new Date();
 
-  if (lastSynced) {
-    // Incremental: go back 2 days to catch any delayed data
-    since.setDate(since.getDate() - 2);
+  if (daysBack !== undefined) {
+    // Explicit override
+    since.setDate(since.getDate() - daysBack);
+  } else if (lastSynced) {
+    // Incremental: go back 5 days to catch delayed/corrected data
+    since.setDate(since.getDate() - 5);
   } else {
-    // Initial sync: last 30 days
-    since.setDate(since.getDate() - 30);
+    // Initial sync (account never synced before): last 90 days
+    since.setDate(since.getDate() - 90);
   }
 
   return {
@@ -45,7 +49,12 @@ async function logSync(
   });
 }
 
-export async function syncAllAdsAccounts(clientId?: string) {
+/**
+ * Sync all (or a single client's) ad accounts.
+ * @param clientId   – if provided, only sync accounts for this client
+ * @param daysBack   – override how many days back to sync (default: 5 incremental / 90 initial)
+ */
+export async function syncAllAdsAccounts(clientId?: string, daysBack?: number) {
   const query = supabase
     .from('ad_accounts')
     .select('*')
@@ -59,11 +68,11 @@ export async function syncAllAdsAccounts(clientId?: string) {
     return;
   }
 
-  console.log(`[Sync] Processing ${accounts.length} ad accounts`);
+  console.log(`[Sync] Processing ${accounts.length} ad accounts (daysBack=${daysBack ?? 'auto'})`);
 
   for (const account of accounts as AdAccount[]) {
     const startedAt = new Date();
-    const dateRange = getDateRange(account.last_synced_at);
+    const dateRange = getDateRange(account.last_synced_at, daysBack);
     let totalRecords = 0;
 
     try {
