@@ -24,20 +24,33 @@ router.get('/campaigns', requireAuth, async (req, res) => {
 
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
-  let query = supabase
-    .from('campaign_stats')
-    .select('*')
-    .eq('client_id', clientId)
-    .order('date', { ascending: false });
+  // Paginate to avoid Supabase 1000-row default limit
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let page = 0;
 
-  if (dateFrom) query = query.gte('date', dateFrom);
-  if (dateTo) query = query.lte('date', dateTo);
-  if (platform) query = query.eq('platform', platform);
+  while (true) {
+    let q = supabase
+      .from('campaign_stats')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('date', { ascending: false })
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+    if (dateFrom) q = q.gte('date', dateFrom);
+    if (dateTo) q = q.lte('date', dateTo);
+    if (platform) q = q.eq('platform', platform);
 
-  res.json({ data });
+    const { data: batch, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    if (!batch || batch.length === 0) break;
+
+    allRows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    page++;
+  }
+
+  res.json({ data: allRows });
 });
 
 // GET /api/stats/adsets?clientId=...&dateFrom=...&dateTo=...&campaignId=...
@@ -56,21 +69,34 @@ router.get('/adsets', requireAuth, async (req, res) => {
 
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
-  let query = supabase
-    .from('adset_stats')
-    .select('*')
-    .eq('client_id', clientId)
-    .order('date', { ascending: false });
+  // Paginate to avoid Supabase 1000-row default limit
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let page = 0;
 
-  if (dateFrom) query = query.gte('date', dateFrom);
-  if (dateTo) query = query.lte('date', dateTo);
-  if (campaignId) query = query.eq('campaign_id', campaignId);
-  if (platform) query = query.eq('platform', platform);
+  while (true) {
+    let q = supabase
+      .from('adset_stats')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('date', { ascending: false })
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+    if (dateFrom) q = q.gte('date', dateFrom);
+    if (dateTo) q = q.lte('date', dateTo);
+    if (campaignId) q = q.eq('campaign_id', campaignId);
+    if (platform) q = q.eq('platform', platform);
 
-  res.json({ data });
+    const { data: batch, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    if (!batch || batch.length === 0) break;
+
+    allRows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    page++;
+  }
+
+  res.json({ data: allRows });
 });
 
 // GET /api/stats/creatives?clientId=...&dateFrom=...&dateTo=...
@@ -89,21 +115,34 @@ router.get('/creatives', requireAuth, async (req, res) => {
 
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
-  let query = supabase
-    .from('creative_stats')
-    .select('*')
-    .eq('client_id', clientId)
-    .order('spend', { ascending: false });
+  // Paginate to avoid Supabase 1000-row default limit
+  const PAGE_SIZE = 1000;
+  const allRows: any[] = [];
+  let page = 0;
 
-  if (dateFrom) query = query.gte('date', dateFrom);
-  if (dateTo) query = query.lte('date', dateTo);
-  if (platform) query = query.eq('platform', platform);
-  if (campaignId) query = query.eq('campaign_id', campaignId);
+  while (true) {
+    let q = supabase
+      .from('creative_stats')
+      .select('*')
+      .eq('client_id', clientId)
+      .order('spend', { ascending: false })
+      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
+    if (dateFrom) q = q.gte('date', dateFrom);
+    if (dateTo) q = q.lte('date', dateTo);
+    if (platform) q = q.eq('platform', platform);
+    if (campaignId) q = q.eq('campaign_id', campaignId);
 
-  res.json({ data });
+    const { data: batch, error } = await q;
+    if (error) return res.status(500).json({ error: error.message });
+    if (!batch || batch.length === 0) break;
+
+    allRows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    page++;
+  }
+
+  res.json({ data: allRows });
 });
 
 // GET /api/stats/leads?clientId=...&dateFrom=...&dateTo=...&crmType=...
@@ -170,17 +209,30 @@ router.get('/overview', requireAuth, async (req, res) => {
 
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
-  // Fetch campaign stats for aggregation
-  let statsQuery = supabase
-    .from('campaign_stats')
-    .select('platform,spend,impressions,clicks,leads,date')
-    .eq('client_id', clientId);
+  // Fetch campaign stats for aggregation (paginated to avoid 1000-row limit)
+  const STATS_PAGE_SIZE = 1000;
+  const stats: any[] = [];
+  let statsPage = 0;
 
-  if (dateFrom) statsQuery = statsQuery.gte('date', dateFrom);
-  if (dateTo) statsQuery = statsQuery.lte('date', dateTo);
+  while (true) {
+    let sq = supabase
+      .from('campaign_stats')
+      .select('platform,spend,impressions,clicks,leads,date')
+      .eq('client_id', clientId)
+      .order('date', { ascending: false })
+      .range(statsPage * STATS_PAGE_SIZE, (statsPage + 1) * STATS_PAGE_SIZE - 1);
 
-  const { data: stats, error: statsError } = await statsQuery;
-  if (statsError) return res.status(500).json({ error: statsError.message });
+    if (dateFrom) sq = sq.gte('date', dateFrom);
+    if (dateTo) sq = sq.lte('date', dateTo);
+
+    const { data: statsBatch, error: statsError } = await sq;
+    if (statsError) return res.status(500).json({ error: statsError.message });
+    if (!statsBatch || statsBatch.length === 0) break;
+
+    stats.push(...statsBatch);
+    if (statsBatch.length < STATS_PAGE_SIZE) break;
+    statsPage++;
+  }
 
   // Fetch leads count
   let leadsQuery = supabase
@@ -195,7 +247,7 @@ router.get('/overview', requireAuth, async (req, res) => {
   if (leadsError) return res.status(500).json({ error: leadsError.message });
 
   // Aggregate
-  const totals = (stats || []).reduce((acc: { spend: number; impressions: number; clicks: number; leads: number }, row: any) => ({
+  const totals = stats.reduce((acc: { spend: number; impressions: number; clicks: number; leads: number }, row: any) => ({
     spend: acc.spend + (row.spend || 0),
     impressions: acc.impressions + (row.impressions || 0),
     clicks: acc.clicks + (row.clicks || 0),
@@ -206,7 +258,7 @@ router.get('/overview', requireAuth, async (req, res) => {
   const cpl = totals.leads > 0 ? totals.spend / totals.leads : 0;
 
   // By platform
-  const byPlatform = (stats || []).reduce((acc: Record<string, any>, row: any) => {
+  const byPlatform = stats.reduce((acc: Record<string, any>, row: any) => {
     if (!acc[row.platform]) acc[row.platform] = { spend: 0, clicks: 0, leads: 0 };
     acc[row.platform].spend += row.spend || 0;
     acc[row.platform].clicks += row.clicks || 0;
@@ -215,7 +267,7 @@ router.get('/overview', requireAuth, async (req, res) => {
   }, {});
 
   // Daily spend chart data
-  const dailySpend = (stats || []).reduce((acc: Record<string, number>, row: any) => {
+  const dailySpend = stats.reduce((acc: Record<string, number>, row: any) => {
     acc[row.date] = (acc[row.date] || 0) + (row.spend || 0);
     return acc;
   }, {});
