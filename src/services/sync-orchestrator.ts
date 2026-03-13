@@ -4,6 +4,7 @@ import { syncGoogleAdsAccount } from './google-ads';
 import { syncAmoCRM } from './amocrm';
 import { syncBitrix24 } from './bitrix24';
 import { matchUtmForClient } from './utm-matcher';
+import { buildCrossAnalytics } from './cross-analytics-builder';
 import { AdAccount, CrmConnection } from '../types/database';
 
 // Default: sync last 30 days on first sync, last 2 days on incremental
@@ -76,6 +77,13 @@ export async function syncAllAdsAccounts(clientId?: string) {
       // TikTok: future
 
       await logSync(account.client_id, account.platform, 'success', totalRecords, startedAt);
+
+      // Rebuild cross-analytics after ad data sync
+      try {
+        await buildCrossAnalytics(account.client_id, { dateFrom: dateRange.since, dateTo: dateRange.until });
+      } catch (err: any) {
+        console.error(`[Sync] Cross-analytics build failed for ${account.client_id}:`, err.message);
+      }
     } catch (err: any) {
       console.error(`[Sync] Failed for account ${account.id}:`, err.message);
       await logSync(account.client_id, account.platform, 'error', 0, startedAt, err.message);
@@ -108,6 +116,13 @@ export async function syncSingleCrmConnection(connection: CrmConnection) {
     await matchUtmForClient(connection.client_id);
   } catch (err: any) {
     console.error('[Sync] UTM matching failed:', err.message);
+  }
+
+  // Rebuild cross-analytics after CRM sync + UTM matching
+  try {
+    await buildCrossAnalytics(connection.client_id);
+  } catch (err: any) {
+    console.error('[Sync] Cross-analytics build failed:', err.message);
   }
 
   return result;

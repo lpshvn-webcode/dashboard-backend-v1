@@ -6,6 +6,7 @@ import { syncFacebookAccount } from '../services/facebook';
 import { syncBitrix24 } from '../services/bitrix24';
 import { syncAmoCRM } from '../services/amocrm';
 import { matchUtmForClient } from '../services/utm-matcher';
+import { buildCrossAnalytics } from '../services/cross-analytics-builder';
 
 const router = Router();
 
@@ -324,13 +325,22 @@ router.get('/crm/:id/sync-stream', requireAuthFromQuery, async (req, res) => {
     // UTM-матчинг после синхронизации CRM.
     // Runs unconditionally — even if frontend already closed the SSE connection,
     // server-side matching must complete so Supabase data is up to date.
-    sendProgress('UTM-матчинг...', 97);
+    sendProgress('UTM-матчинг...', 90);
     try {
       const matchResult = await matchUtmForClient(conn.client_id);
       console.log(`[Sync Stream] UTM matching done: matched=${matchResult.matched}, skipped=${matchResult.skipped}`);
       result = { ...result, matched: matchResult.matched, skipped: matchResult.skipped };
     } catch (err: any) {
       console.error('[Sync Stream] UTM matching failed:', err.message);
+    }
+
+    // Build cross-analytics table
+    sendProgress('Сквозная аналитика...', 95);
+    try {
+      const crossResult = await buildCrossAnalytics(conn.client_id);
+      console.log(`[Sync Stream] Cross-analytics built: rows=${crossResult.rowsUpserted}, leads=${crossResult.leadsAttributed}`);
+    } catch (err: any) {
+      console.error('[Sync Stream] Cross-analytics build failed:', err.message);
     }
 
     clearTimeout(timeout);

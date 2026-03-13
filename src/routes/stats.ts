@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { matchUtmForClient } from '../services/utm-matcher';
+import { buildCrossAnalytics } from '../services/cross-analytics-builder';
 
 const router = Router();
 
@@ -426,5 +427,367 @@ router.post('/match-utm', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── Cross-analytics endpoints ─────────────────────────────────────────────────
+
+// POST /api/stats/build-cross-analytics?clientId=...
+// Manual trigger to rebuild cross_analytics table
+router.post('/build-cross-analytics', requireAuth, async (req, res) => {
+  const { clientId, dateFrom, dateTo, fullRebuild } = req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  try {
+    const result = await buildCrossAnalytics(clientId, {
+      dateFrom: dateFrom || undefined,
+      dateTo: dateTo || undefined,
+      fullRebuild: fullRebuild === 'true',
+    });
+    res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/stats/cross-analytics?clientId=...&dateFrom=...&dateTo=...
+// &level=campaign|adset|creative&campaignName=...&adsetName=...
+// &platform=...&matchedOnly=true
+router.get('/cross-analytics', requireAuth, async (req, res) => {
+  const { clientId, dateFrom, dateTo, level, campaignName, adsetName, platform, matchedOnly } =
+    req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!dateFrom || !dateTo) return res.status(400).json({ error: 'dateFrom and dateTo required' });
+
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  const groupLevel = level || 'campaign';
+
+  try {
+    // Build base query with date & optional platform filter
+    // We use raw SQL via rpc for GROUP BY, since Supabase JS doesn't support it natively.
+    // Fallback: paginated select + JS aggregation.
+
+    const PAGE_SIZE = 1000;
+    const allRows: any[] = [];
+    let page = 0;
+
+    while (true) {
+      let q = supabase
+        .from('cross_analytics')
+        .select('*')
+        .eq('client_id', clientId)
+        .gte('date', dateFrom)
+        .lte('date', dateTo)
+        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+
+      if (platform) q = q.eq('platform', platform);
+      if (campaignName) q = q.eq('campaign_name', campaignName);
+      if (adsetName) q = q.eq('adset_name', adsetName);
+
+      const { data: batch, error } = await q;
+      if (error) return res.status(500).json({ error: error.message });
+      if (!batch || batch.length === 0) break;
+
+      allRows.push(...batch);
+      if (batch.length < PAGE_SIZE) break;
+      page++;
+    }
+
+    // Aggregate based on level
+    if (groupLevel === 'creative') {
+      // No aggregation — return raw rows (already per ad per day, but group by ad)
+      const adMap = new Map<string, any>();
+      for (const row of allRows) {
+        const key = `${row.ad_id}|${row.ad_account_id}`;
+        const existing = adMap.get(key);
+        if (existing) {
+          existing.spend += Number(row.spend) || 0;
+          existing.impressions += Number(row.impressions) || 0;
+          existing.clicks += Number(row.clicks) || 0;
+          existing.reach += Number(row.reach) || 0;
+          existing.leads_platform += Number(row.leads_platform) || 0;
+          existing.leads_crm += Number(row.leads_crm) || 0;
+          existing.qualified_leads += Number(row.qualified_leads) || 0;
+          existing.sales_count += Number(row.sales_count) || 0;
+          existing.revenue += Number(row.revenue) || 0;
+        } else {
+          adMap.set(key, {
+            ad_id: row.ad_id,
+            ad_name: row.ad_name,
+            ad_status: row.ad_status,
+            adset_name: row.adset_name,
+            campaign_name: row.campaign_name,
+            platform: row.platform,
+            image_url: row.image_url,
+            thumbnail_url: row.thumbnail_url,
+            video_url: row.video_url,
+            spend: Number(row.spend) || 0,
+            impressions: Number(row.impressions) || 0,
+            clicks: Number(row.clicks) || 0,
+            reach: Number(row.reach) || 0,
+            leads_platform: Number(row.leads_platform) || 0,
+            leads_crm: Number(row.leads_crm) || 0,
+            qualified_leads: Number(row.qualified_leads) || 0,
+            sales_count: Number(row.sales_count) || 0,
+            revenue: Number(row.revenue) || 0,
+          });
+        }
+      }
+      const data = Array.from(adMap.values()).map(r => ({
+        ...r,
+        cpl: r.leads_crm > 0 ? r.spend / r.leads_crm : 0,
+        ctr: r.impressions > 0 ? (r.clicks / r.impressions) * 100 : 0,
+        cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
+      }));
+      data.sort((a, b) => b.spend - a.spend);
+      return res.json({ data, totals: buildTotals(data) });
+    }
+
+    if (groupLevel === 'adset') {
+      const adsetMap = new Map<string, any>();
+      for (const row of allRows) {
+        const key = `${row.adset_id}|${row.campaign_name}`;
+        const existing = adsetMap.get(key);
+        if (existing) {
+          existing.spend += Number(row.spend) || 0;
+          existing.impressions += Number(row.impressions) || 0;
+          existing.clicks += Number(row.clicks) || 0;
+          existing.reach += Number(row.reach) || 0;
+          existing.leads_platform += Number(row.leads_platform) || 0;
+          existing.leads_crm += Number(row.leads_crm) || 0;
+          existing.qualified_leads += Number(row.qualified_leads) || 0;
+          existing.sales_count += Number(row.sales_count) || 0;
+          existing.revenue += Number(row.revenue) || 0;
+        } else {
+          adsetMap.set(key, {
+            adset_id: row.adset_id,
+            adset_name: row.adset_name,
+            campaign_name: row.campaign_name,
+            platform: row.platform,
+            spend: Number(row.spend) || 0,
+            impressions: Number(row.impressions) || 0,
+            clicks: Number(row.clicks) || 0,
+            reach: Number(row.reach) || 0,
+            leads_platform: Number(row.leads_platform) || 0,
+            leads_crm: Number(row.leads_crm) || 0,
+            qualified_leads: Number(row.qualified_leads) || 0,
+            sales_count: Number(row.sales_count) || 0,
+            revenue: Number(row.revenue) || 0,
+          });
+        }
+      }
+      const data = Array.from(adsetMap.values()).map(r => ({
+        ...r,
+        cpl: r.leads_crm > 0 ? r.spend / r.leads_crm : 0,
+        ctr: r.impressions > 0 ? (r.clicks / r.impressions) * 100 : 0,
+        cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
+      }));
+      data.sort((a, b) => b.spend - a.spend);
+      return res.json({ data, totals: buildTotals(data) });
+    }
+
+    // Default: campaign level
+    const campMap = new Map<string, any>();
+    for (const row of allRows) {
+      const key = row.campaign_name;
+      const existing = campMap.get(key);
+      if (existing) {
+        existing.spend += Number(row.spend) || 0;
+        existing.impressions += Number(row.impressions) || 0;
+        existing.clicks += Number(row.clicks) || 0;
+        existing.reach += Number(row.reach) || 0;
+        existing.leads_platform += Number(row.leads_platform) || 0;
+        existing.leads_crm += Number(row.leads_crm) || 0;
+        existing.qualified_leads += Number(row.qualified_leads) || 0;
+        existing.sales_count += Number(row.sales_count) || 0;
+        existing.revenue += Number(row.revenue) || 0;
+        if (row.date < existing.first_date) existing.first_date = row.date;
+        if (row.date > existing.last_date) existing.last_date = row.date;
+        // Collect unique campaign_statuses — use ACTIVE if any row is active
+        if (row.campaign_status === 'ACTIVE') existing.campaign_status = 'ACTIVE';
+      } else {
+        campMap.set(key, {
+          campaign_name: row.campaign_name,
+          campaign_id: row.campaign_id,
+          campaign_status: row.campaign_status,
+          platform: row.platform,
+          spend: Number(row.spend) || 0,
+          impressions: Number(row.impressions) || 0,
+          clicks: Number(row.clicks) || 0,
+          reach: Number(row.reach) || 0,
+          leads_platform: Number(row.leads_platform) || 0,
+          leads_crm: Number(row.leads_crm) || 0,
+          qualified_leads: Number(row.qualified_leads) || 0,
+          sales_count: Number(row.sales_count) || 0,
+          revenue: Number(row.revenue) || 0,
+          first_date: row.date,
+          last_date: row.date,
+        });
+      }
+    }
+
+    let data = Array.from(campMap.values()).map(r => ({
+      ...r,
+      cpl: r.leads_crm > 0 ? r.spend / r.leads_crm : 0,
+      ctr: r.impressions > 0 ? (r.clicks / r.impressions) * 100 : 0,
+      cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
+    }));
+
+    // matchedOnly: filter to campaigns that have at least 1 CRM lead
+    if (matchedOnly === 'true') {
+      data = data.filter(c => c.leads_crm > 0);
+    }
+
+    data.sort((a, b) => b.spend - a.spend);
+
+    return res.json({ data, totals: buildTotals(data) });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/stats/cross-kpis?clientId=...&dateFrom=...&dateTo=...&platform=...&matchedOnly=true
+router.get('/cross-kpis', requireAuth, async (req, res) => {
+  const { clientId, dateFrom, dateTo, platform, matchedOnly } = req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!dateFrom || !dateTo) return res.status(400).json({ error: 'dateFrom and dateTo required' });
+
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  try {
+    // Helper to aggregate a period
+    async function aggregatePeriod(from: string, to: string) {
+      const PAGE_SIZE = 1000;
+      const rows: any[] = [];
+      let page = 0;
+
+      while (true) {
+        let q = supabase
+          .from('cross_analytics')
+          .select('date, spend, impressions, clicks, reach, leads_platform, leads_crm, qualified_leads, sales_count, revenue, campaign_name')
+          .eq('client_id', clientId)
+          .gte('date', from)
+          .lte('date', to)
+          .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+
+        if (platform) q = q.eq('platform', platform);
+
+        const { data: batch, error } = await q;
+        if (error) throw new Error(error.message);
+        if (!batch || batch.length === 0) break;
+        rows.push(...batch);
+        if (batch.length < PAGE_SIZE) break;
+        page++;
+      }
+
+      // If matchedOnly, first find campaigns with leads
+      let filteredRows = rows;
+      if (matchedOnly === 'true') {
+        const campaignsWithLeads = new Set<string>();
+        const leadsByCampaign: Record<string, number> = {};
+        for (const r of rows) {
+          leadsByCampaign[r.campaign_name] = (leadsByCampaign[r.campaign_name] || 0) + (Number(r.leads_crm) || 0);
+        }
+        for (const [name, count] of Object.entries(leadsByCampaign)) {
+          if (count > 0) campaignsWithLeads.add(name);
+        }
+        filteredRows = rows.filter(r => campaignsWithLeads.has(r.campaign_name));
+      }
+
+      const totals = {
+        spend: 0, impressions: 0, clicks: 0, reach: 0,
+        leads_platform: 0, leads_crm: 0, qualified_leads: 0,
+        sales_count: 0, revenue: 0,
+      };
+      const dailySpend: Record<string, number> = {};
+
+      for (const r of filteredRows) {
+        totals.spend += Number(r.spend) || 0;
+        totals.impressions += Number(r.impressions) || 0;
+        totals.clicks += Number(r.clicks) || 0;
+        totals.reach += Number(r.reach) || 0;
+        totals.leads_platform += Number(r.leads_platform) || 0;
+        totals.leads_crm += Number(r.leads_crm) || 0;
+        totals.qualified_leads += Number(r.qualified_leads) || 0;
+        totals.sales_count += Number(r.sales_count) || 0;
+        totals.revenue += Number(r.revenue) || 0;
+        dailySpend[r.date] = (dailySpend[r.date] || 0) + (Number(r.spend) || 0);
+      }
+
+      return { totals, dailySpend };
+    }
+
+    // Current period
+    const current = await aggregatePeriod(dateFrom, dateTo);
+
+    // Previous period (same duration, immediately before)
+    const fromDate = new Date(dateFrom);
+    const toDate = new Date(dateTo);
+    const durationMs = toDate.getTime() - fromDate.getTime() + 24 * 60 * 60 * 1000; // inclusive
+    const prevTo = new Date(fromDate.getTime() - 24 * 60 * 60 * 1000);
+    const prevFrom = new Date(prevTo.getTime() - durationMs + 24 * 60 * 60 * 1000);
+
+    const previous = await aggregatePeriod(
+      prevFrom.toISOString().split('T')[0],
+      prevTo.toISOString().split('T')[0],
+    );
+
+    res.json({
+      current: current.totals,
+      previous: previous.totals,
+      dailySpend: Object.entries(current.dailySpend)
+        .map(([date, spend]) => ({ date, spend }))
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper function to build totals from aggregated data
+function buildTotals(data: any[]) {
+  return data.reduce(
+    (acc, r) => ({
+      spend: acc.spend + (r.spend || 0),
+      impressions: acc.impressions + (r.impressions || 0),
+      clicks: acc.clicks + (r.clicks || 0),
+      reach: acc.reach + (r.reach || 0),
+      leads_platform: acc.leads_platform + (r.leads_platform || 0),
+      leads_crm: acc.leads_crm + (r.leads_crm || 0),
+      qualified_leads: acc.qualified_leads + (r.qualified_leads || 0),
+      sales_count: acc.sales_count + (r.sales_count || 0),
+      revenue: acc.revenue + (r.revenue || 0),
+    }),
+    { spend: 0, impressions: 0, clicks: 0, reach: 0, leads_platform: 0, leads_crm: 0, qualified_leads: 0, sales_count: 0, revenue: 0 },
+  );
+}
 
 export default router;
