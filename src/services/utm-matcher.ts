@@ -185,8 +185,9 @@ export async function matchUtmForClient(
   }
 
   console.log(`[UTM Matcher] Built ${triples.length} FB triples (campaign+adset+ad), skipped ${skippedPromo} promo/boost triples`);
-  triples.forEach((t: FbTriple, i: number) => {
-    console.log(`[UTM Matcher] Triple[${i}]: campaign="${t.campaignName}" | adset="${t.adsetName}" | ad="${t.adName}" | uniqueNames=${t.normNamesSet.size} | normalized=[${t.normNames.join(' | ')}]`);
+  // Лог только первых 5 троек для диагностики (не все — Railway rate limit 500 logs/sec)
+  triples.slice(0, 5).forEach((t: FbTriple, i: number) => {
+    console.log(`[UTM Matcher] Triple[${i}]: campaign="${t.campaignName}" | adset="${t.adsetName}" | ad="${t.adName}" | uniqueNames=${t.normNamesSet.size}`);
   });
 
   if (triples.length === 0) {
@@ -260,19 +261,11 @@ export async function matchUtmForClient(
 
     if (!foundTriple) {
       skipped++;
-      if (skipped <= 10) {
-        console.log(`[UTM Matcher] ❌ NO MATCH lead_id=${lead.id}: UTM pool=[${Array.from(utmPool).join(' | ')}]`);
-        console.log(`[UTM Matcher]   UTM fields: source="${lead.utm_source || ''}" | medium="${lead.utm_medium || ''}" | campaign="${lead.utm_campaign || ''}" | content="${lead.utm_content || ''}" | term="${lead.utm_term || ''}"`);
+      if (skipped <= 5) {
+        console.log(`[UTM Matcher] ❌ NO MATCH lead_id=${lead.id}: source="${lead.utm_source || ''}" campaign="${lead.utm_campaign || ''}"`);
       }
       continue;
     }
-
-    // ── Детальный лог каждого матча для диагностики ложных срабатываний ──
-    console.log(`[UTM Matcher] ✅ MATCH #${matched + 1} lead_id=${lead.id}`);
-    console.log(`[UTM Matcher]   UTM fields: source="${lead.utm_source || ''}" | medium="${lead.utm_medium || ''}" | campaign="${lead.utm_campaign || ''}" | content="${lead.utm_content || ''}" | term="${lead.utm_term || ''}"`);
-    console.log(`[UTM Matcher]   UTM pool (normalized): [${Array.from(utmPool).join(' | ')}]`);
-    console.log(`[UTM Matcher]   FB triple: campaign="${foundTriple.campaignName}" | adset="${foundTriple.adsetName}" | ad="${foundTriple.adName}"`);
-    console.log(`[UTM Matcher]   FB pool (normalized): [${foundTriple.normNames.join(' | ')}] (unique=${foundTriple.normNamesSet.size})`);
 
     matchedLeads.push({
       id: lead.id,
