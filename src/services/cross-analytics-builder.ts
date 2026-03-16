@@ -247,17 +247,43 @@ export async function buildCrossAnalytics(
   );
 
   // ── 5. Load matched CRM leads and attribute to cross rows ──────────────────
-  // Load all matched, non-duplicate CRM records regardless of record_type.
-  // Deduplication (phone + UTM based) runs during the Bitrix sync and marks
-  // true duplicates as is_duplicate=true before we get here.
+  //
+  // Some CRMs (Bitrix24 sync_type='both') create BOTH a Lead (form submission
+  // with UTM) AND a Deal (sales pipeline entry) for the same contact. Both get
+  // matched by the UTM matcher → double-counting leads_crm.
+  //
+  // Resolution rule (no config needed):
+  //   • If ANY matched non-dup Lead exists → count ONLY Leads.
+  //     Rationale: Leads are the raw form submission — the correct unit for
+  //     "how many people clicked the ad and filled the form".
+  //   • If NO matched Leads exist but Deals do → count Deals.
+  //     Rationale: client uses Deals as their primary lead entity (AMO, etc.)
+  //
+  // This avoids 2× inflation without requiring per-client configuration.
+
+  const { count: matchedLeadCount } = await supabase
+    .from('crm_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_id', clientId)
+    .eq('record_type', 'lead')
+    .not('matched_campaign_id', 'is', null)
+    .eq('is_duplicate', false);
+
+  const useLeadsOnly = (matchedLeadCount || 0) > 0;
+  console.log(`[CrossBuilder] Matched leads: ${matchedLeadCount ?? 0} → ${useLeadsOnly ? 'counting LEADS only' : 'counting all records (no leads with match)'}`);
+
   const leads = await paginatedSelect(
     'crm_leads',
     clientId,
     'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, is_duplicate',
-    (q) => q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false),
+    (q) => {
+      let q2 = q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false);
+      if (useLeadsOnly) q2 = q2.eq('record_type', 'lead');
+      return q2;
+    },
   );
 
-  console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM records`);
+  console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM ${useLeadsOnly ? 'leads' : 'records'}`);
 
   let leadsAttributed = 0;
   let leadsUnattributed = 0;
