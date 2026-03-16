@@ -30,7 +30,7 @@ interface FbAd {
   campaign_id: string;
   status: string;
   effective_status: string;
-  creative?: { id: string; thumbnail_url?: string; image_url?: string };
+  creative?: { id: string; thumbnail_url?: string; image_url?: string; video_url?: string };
   insights?: { data: FbInsight[] };
 }
 
@@ -193,7 +193,7 @@ export async function syncFacebookAccount(
     progress('Загрузка объявлений...', 72);
     const adsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/ads`, {
       access_token: account.access_token,
-      fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
+      fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url,video_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
       limit: '500',
     });
@@ -225,6 +225,7 @@ export async function syncFacebookAccount(
           cpl: leads > 0 ? spend / leads : 0,
           image_url: ad.creative?.image_url,
           thumbnail_url: ad.creative?.thumbnail_url,
+          video_url: ad.creative?.video_url,
           currency: 'USD',
           created_at: '',
         });
