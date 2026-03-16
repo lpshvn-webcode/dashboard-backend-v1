@@ -81,10 +81,15 @@ export async function syncFacebookAccount(
   try {
     // ── 1. Campaigns ──────────────────────────────────────────────────────────
     progress('Загрузка кампаний...', 15);
+    // Include ARCHIVED and DELETED campaigns/adsets/ads so that historical data
+    // (e.g. spend from ads that have since been deleted) is not lost on re-sync.
+    const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED', 'DELETED']);
+
     const campaignsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
       fields: `id,name,status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
+      effective_status: allStatuses,
       limit: '200',
     });
 
@@ -138,6 +143,7 @@ export async function syncFacebookAccount(
       access_token: account.access_token,
       fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
+      effective_status: allStatuses,
       limit: '500',
     });
 
@@ -195,6 +201,7 @@ export async function syncFacebookAccount(
       access_token: account.access_token,
       fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
+      effective_status: allStatuses,
       limit: '500',
     });
 
