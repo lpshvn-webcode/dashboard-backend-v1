@@ -193,7 +193,7 @@ export async function syncFacebookAccount(
     progress('Загрузка объявлений...', 72);
     const adsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/ads`, {
       access_token: account.access_token,
-      fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url,video_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
+      fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       time_range: timeRange,
       limit: '500',
     });
