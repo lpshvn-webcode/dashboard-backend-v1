@@ -265,12 +265,13 @@ export async function buildCrossAnalytics(
     const adsetName = lead.matched_adset_id as string;
     const adName = lead.matched_ad_id as string;
 
-    // Extract date from created_at_crm in Moscow timezone (UTC+3).
-    // Bitrix24 API returns DATE_CREATE with MSK offset (e.g. "2026-03-09T01:00:00+03:00"),
-    // which we store as UTC ("2026-03-08T22:00:00Z"). To match FB ad dates (MSK),
-    // we shift +3h before taking the date part so "2026-03-08T22:00:00Z" → "2026-03-09".
+    // Extract date from created_at_crm in the client's local timezone (UTC+5, Kazakhstan/KZT).
+    // Bitrix24 portal is configured for UTC+5; DATE_CREATE is returned with that offset
+    // (e.g. "2026-03-09T01:00:00+05:00") and we store it as UTC ("2026-03-08T20:00:00Z").
+    // We shift +5h before taking the date so the day matches what Bitrix shows locally,
+    // and also matches the FB ad account dates (also set to Almaty/UTC+5).
     const createdDate = lead.created_at_crm
-      ? new Date(new Date(lead.created_at_crm).getTime() + 3 * 60 * 60 * 1000)
+      ? new Date(new Date(lead.created_at_crm).getTime() + 5 * 60 * 60 * 1000)
           .toISOString()
           .substring(0, 10)
       : null;
