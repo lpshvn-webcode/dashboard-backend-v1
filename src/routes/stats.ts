@@ -772,6 +772,116 @@ router.get('/cross-kpis', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/stats/debug-data?clientId=...&dateFrom=...&dateTo=...
+// Detailed data integrity check: shows raw counts from all tables for a date range
+router.get('/debug-data', requireAuth, async (req, res) => {
+  const { clientId, dateFrom, dateTo } = req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+
+  const { data: client } = await supabase
+    .from('clients')
+    .select('id')
+    .eq('id', clientId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  const from = dateFrom || '2026-01-01';
+  const to   = dateTo   || new Date().toISOString().split('T')[0];
+
+  try {
+    // ── creative_stats coverage ────────────────────────────────────────────
+    const { data: creativeStats } = await supabase
+      .from('creative_stats')
+      .select('date, spend')
+      .eq('client_id', clientId)
+      .gte('date', from)
+      .lte('date', to)
+      .order('date', { ascending: true });
+
+    const creativeByDate: Record<string, { count: number; spend: number }> = {};
+    for (const r of creativeStats || []) {
+      if (!creativeByDate[r.date]) creativeByDate[r.date] = { count: 0, spend: 0 };
+      creativeByDate[r.date].count++;
+      creativeByDate[r.date].spend += Number(r.spend) || 0;
+    }
+
+    // ── crm_leads breakdown ────────────────────────────────────────────────
+    const { data: crmLeads } = await supabase
+      .from('crm_leads')
+      .select('record_type, is_duplicate, matched_campaign_id, created_at_crm')
+      .eq('client_id', clientId)
+      .gte('created_at_crm', from)
+      .lte('created_at_crm', to + 'T23:59:59');
+
+    const leadsBreakdown = {
+      total: 0,
+      byRecordType: {} as Record<string, number>,
+      duplicates: 0,
+      matched: 0,
+      matchedNonDup: 0,
+      matchedDealsOnly: 0,
+    };
+    for (const r of crmLeads || []) {
+      leadsBreakdown.total++;
+      leadsBreakdown.byRecordType[r.record_type || 'unknown'] =
+        (leadsBreakdown.byRecordType[r.record_type || 'unknown'] || 0) + 1;
+      if (r.is_duplicate) leadsBreakdown.duplicates++;
+      if (r.matched_campaign_id) leadsBreakdown.matched++;
+      if (r.matched_campaign_id && !r.is_duplicate) leadsBreakdown.matchedNonDup++;
+      if (r.matched_campaign_id && !r.is_duplicate && r.record_type === 'deal') leadsBreakdown.matchedDealsOnly++;
+    }
+
+    // ── cross_analytics summary ────────────────────────────────────────────
+    const { data: crossRows } = await supabase
+      .from('cross_analytics')
+      .select('spend, leads_crm, leads_platform, qualified_leads, sales_count, revenue')
+      .eq('client_id', clientId)
+      .gte('date', from)
+      .lte('date', to);
+
+    const crossTotals = { rows: 0, spend: 0, leads_crm: 0, leads_platform: 0, qualified_leads: 0, sales_count: 0, revenue: 0 };
+    for (const r of crossRows || []) {
+      crossTotals.rows++;
+      crossTotals.spend += Number(r.spend) || 0;
+      crossTotals.leads_crm += Number(r.leads_crm) || 0;
+      crossTotals.leads_platform += Number(r.leads_platform) || 0;
+      crossTotals.qualified_leads += Number(r.qualified_leads) || 0;
+      crossTotals.sales_count += Number(r.sales_count) || 0;
+      crossTotals.revenue += Number(r.revenue) || 0;
+    }
+
+    res.json({
+      dateRange: { from, to },
+      creativeStats: {
+        totalRows: (creativeStats || []).length,
+        totalSpend: Object.values(creativeByDate).reduce((s, d) => s + d.spend, 0),
+        daysWithData: Object.keys(creativeByDate).length,
+        // Show per-day breakdown for quick spotting of missing dates
+        byDate: Object.entries(creativeByDate).map(([date, d]) => ({ date, rows: d.count, spend: Math.round(d.spend * 100) / 100 })),
+      },
+      crmLeads: leadsBreakdown,
+      crossAnalytics: crossTotals,
+      diagnosis: [
+        leadsBreakdown.byRecordType['lead'] > 0 && leadsBreakdown.byRecordType['deal'] > 0
+          ? `⚠️ DOUBLE-COUNT RISK: Both leads (${leadsBreakdown.byRecordType['lead']}) and deals (${leadsBreakdown.byRecordType['deal']}) present. Builder now uses deals only (matchedDealsOnly=${leadsBreakdown.matchedDealsOnly}).`
+          : '✅ Single record type — no double-count risk.',
+        crossTotals.spend < 10 && (creativeStats || []).length > 0
+          ? `⚠️ LOW SPEND in cross_analytics ($${crossTotals.spend.toFixed(2)}) vs ${(creativeStats || []).length} creative_stats rows. Run build-cross-analytics to refresh.`
+          : `✅ cross_analytics spend: $${crossTotals.spend.toFixed(2)}`,
+        Object.keys(creativeByDate).length === 0
+          ? '⚠️ No creative_stats data for this date range — trigger FB resync.'
+          : `✅ creative_stats has ${Object.keys(creativeByDate).length} days of data.`,
+      ],
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Helper function to build totals from aggregated data
 function buildTotals(data: any[]) {
   return data.reduce(

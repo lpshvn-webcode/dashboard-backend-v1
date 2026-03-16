@@ -247,15 +247,37 @@ export async function buildCrossAnalytics(
   );
 
   // ── 5. Load matched CRM leads and attribute to cross rows ──────────────────
-  // Only non-duplicate leads; 65 total in Supabase = 60 unique + 5 duplicates (is_duplicate=true).
+  // When a client syncs BOTH Bitrix24 Leads and Deals (sync_type='both'),
+  // the same real contact exists as two records: record_type='lead' (L_xxx)
+  // and record_type='deal' (D_xxx). Phone-based dedup only works when phone
+  // fields are populated; form leads often have no phone, so dedup fails and
+  // both records get counted → inflated lead numbers (e.g. 191 vs 78 real).
+  //
+  // Fix: if Deals exist for this client, count ONLY Deals. Deals represent
+  // the canonical converted leads in Bitrix24 pipeline analytics.
+  const { count: dealCount } = await supabase
+    .from('crm_leads')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_id', clientId)
+    .eq('record_type', 'deal')
+    .not('matched_campaign_id', 'is', null)
+    .eq('is_duplicate', false);
+
+  const useOnlyDeals = (dealCount || 0) > 0;
+  console.log(`[CrossBuilder] Deal records with match: ${dealCount ?? 0} → ${useOnlyDeals ? 'using DEALS only' : 'using all records'}`);
+
   const leads = await paginatedSelect(
     'crm_leads',
     clientId,
     'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, is_duplicate',
-    (q) => q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false),
+    (q) => {
+      let q2 = q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false);
+      if (useOnlyDeals) q2 = q2.eq('record_type', 'deal');
+      return q2;
+    },
   );
 
-  console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM leads`);
+  console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM ${useOnlyDeals ? 'deals' : 'leads'}`);
 
   let leadsAttributed = 0;
   let leadsUnattributed = 0;

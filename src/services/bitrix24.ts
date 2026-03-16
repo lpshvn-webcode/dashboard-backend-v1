@@ -409,54 +409,85 @@ export async function syncBitrix24(
     }
   }
 
-  // ── Deduplicate by phone (only when syncing both leads and deals) ─────────
+  // ── Deduplicate by phone + UTM (only when syncing both leads and deals) ────
+  // Problem: when sync_type='both', the same contact exists as both a Lead
+  // (L_xxx) and a Deal (D_xxx). We must mark Leads as is_duplicate=true to
+  // avoid double-counting in analytics.
+  //
+  // Strategy:
+  //   1. Phone match: if a Lead's phone appears in any Deal → duplicate.
+  //   2. UTM match (fallback): if a Lead's UTM combination matches a Deal's
+  //      UTM combination → duplicate. Handles form leads that have no phone.
   let duplicatesMarked = 0;
   if (syncType === 'both') {
-    console.log(`[Bitrix24] Deduplicating by phone...`);
+    console.log(`[Bitrix24] Deduplicating by phone + UTM...`);
     progress('Очищение дублей...', 95);
 
-    // Get all phones that exist in deals for this connection
-    const { data: dealRows } = await supabase
+    // Fetch all records for this connection (both leads and deals)
+    const { data: allRecords } = await supabase
       .from('crm_leads')
-      .select('phone')
-      .eq('crm_connection_id', connection.id)
-      .eq('record_type', 'deal')
-      .not('phone', 'is', null);
+      .select('id, record_type, phone, utm_campaign, utm_content, utm_term, utm_source, utm_medium')
+      .eq('crm_connection_id', connection.id);
 
-    const dealPhones = [...new Set(
-      ((dealRows || []) as Array<{ phone: string }>)
-        .map(r => r.phone)
-        .filter((p): p is string => Boolean(p)),
-    )];
+    const deals    = (allRecords || []).filter((r: any) => r.record_type === 'deal');
+    const rawLeads = (allRecords || []).filter((r: any) => r.record_type === 'lead');
 
-    if (dealPhones.length > 0) {
-      const { count, error } = await supabase
-        .from('crm_leads')
-        .update({ is_duplicate: true })
-        .eq('crm_connection_id', connection.id)
-        .eq('record_type', 'lead')
-        .in('phone', dealPhones)
-        .select('id', { count: 'exact', head: true });
+    // Build sets of deal signatures for fast lookup
+    const dealPhones = new Set<string>(
+      deals.map((d: any) => d.phone as string | null).filter((p: string | null): p is string => Boolean(p)),
+    );
 
-      if (error) {
-        console.error('[Bitrix24] Dedup error:', error.message);
+    // UTM signature: non-empty utm_campaign + utm_content (most specific combo)
+    const utmSig = (r: { utm_campaign?: string | null; utm_content?: string | null }): string | null => {
+      const camp = (r.utm_campaign || '').trim().toLowerCase();
+      const cont = (r.utm_content || '').trim().toLowerCase();
+      if (!camp && !cont) return null;
+      return `${camp}|${cont}`;
+    };
+    const dealUtmSigs = new Set<string>(
+      deals.map((d: any) => utmSig(d)).filter((s: string | null): s is string => s !== null),
+    );
+
+    const dupIds: string[] = [];
+    const notDupIds: string[] = [];
+
+    for (const lead of rawLeads) {
+      const phoneMatch = lead.phone && dealPhones.has(lead.phone);
+      const sig = utmSig(lead);
+      const utmMatch = sig !== null && dealUtmSigs.has(sig);
+
+      if (phoneMatch || utmMatch) {
+        dupIds.push(lead.id);
       } else {
-        duplicatesMarked = count || 0;
-        console.log(`[Bitrix24] Marked ${duplicatesMarked} leads as duplicates`);
-        progress(`Помечено ${duplicatesMarked} дублей`, 98);
+        notDupIds.push(lead.id);
       }
     }
 
-    // Also reset is_duplicate on leads where phone is NOT in deals
-    // (in case a deal was deleted since last sync)
-    const { error: resetError } = await supabase
-      .from('crm_leads')
-      .update({ is_duplicate: false })
-      .eq('crm_connection_id', connection.id)
-      .eq('record_type', 'lead')
-      .not('phone', 'in', `(${dealPhones.map((p: string) => `'${p}'`).join(',') || "'__none__'"})`);
+    console.log(`[Bitrix24] Dedup: ${dupIds.length} duplicates (phone=${[...dealPhones].length > 0 ? 'yes' : 'no'}, utmSigs=${dealUtmSigs.size}), ${notDupIds.length} unique leads`);
 
-    if (resetError) console.error('[Bitrix24] Dedup reset error:', resetError.message);
+    // Batch mark duplicates
+    const DEDUP_BATCH = 100;
+    for (let i = 0; i < dupIds.length; i += DEDUP_BATCH) {
+      const batch = dupIds.slice(i, i + DEDUP_BATCH);
+      const { error } = await supabase
+        .from('crm_leads')
+        .update({ is_duplicate: true })
+        .in('id', batch);
+      if (error) console.error('[Bitrix24] Dedup mark error:', error.message);
+      else duplicatesMarked += batch.length;
+    }
+
+    // Reset is_duplicate on leads NOT in dupIds (in case a deal was deleted)
+    for (let i = 0; i < notDupIds.length; i += DEDUP_BATCH) {
+      const batch = notDupIds.slice(i, i + DEDUP_BATCH);
+      const { error } = await supabase
+        .from('crm_leads')
+        .update({ is_duplicate: false })
+        .in('id', batch);
+      if (error) console.error('[Bitrix24] Dedup reset error:', error.message);
+    }
+
+    progress(`Помечено ${duplicatesMarked} дублей`, 98);
   }
 
   // ── Update last_synced_at ────────────────────────────────────────────────
