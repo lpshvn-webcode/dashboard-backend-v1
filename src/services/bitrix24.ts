@@ -1,7 +1,7 @@
 import axios from 'axios';
 import he from 'he';
 import { supabase } from '../lib/supabase';
-import { CrmConnection, CrmLead, CrmSyncType } from '../types/database';
+import { CrmConnection, CrmLead, CrmSyncType, BitrixSyncConfig } from '../types/database';
 import { normalizePhone } from '../utils/phone';
 
 /** Decode HTML entities from Bitrix24 response (e.g. "&mdash;" → "—") */
@@ -235,6 +235,57 @@ async function fetchContactPhones(
   return phoneMap;
 }
 
+// ── Fetch available CRM entities (leads entity + deal categories) ───────────────
+
+export interface BitrixEntityList {
+  leads: { id: 'leads'; name: string };
+  deal_categories: Array<{ id: number; name: string }>;
+}
+
+export async function fetchBitrixEntities(connection: CrmConnection): Promise<BitrixEntityList> {
+  const isWebhook = !connection.access_token;
+
+  let accessToken = connection.access_token;
+  if (!isWebhook && connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
+    accessToken = await refreshBitrixToken(connection);
+  }
+
+  const rawBaseUrl = isWebhook ? connection.domain : `${connection.domain}/rest`;
+  let baseUrl: string;
+  try {
+    baseUrl = normalizeWebhookUrl(rawBaseUrl);
+  } catch {
+    baseUrl = isWebhook
+      ? `https://${connection.domain.replace(/\/$/, '')}`
+      : `https://${connection.domain}/rest`;
+  }
+
+  const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
+
+  // Fetch default deal category (ID=0)
+  const defaultCatRes = await axios.get(`${baseUrl}/crm.dealcategory.default.get`, {
+    params: authParams,
+    timeout: 15000,
+  });
+  const defaultCat = defaultCatRes.data?.result;
+  const defaultCategory = { id: 0, name: defaultCat?.NAME ? decodeHtml(defaultCat.NAME) as string : 'Основная воронка' };
+
+  // Fetch all named deal categories
+  const namedCatsRes = await axios.get(`${baseUrl}/crm.dealcategory.list`, {
+    params: authParams,
+    timeout: 15000,
+  });
+  const namedCats: Array<{ id: number; name: string }> = (namedCatsRes.data?.result || []).map((c: any) => ({
+    id: Number(c.ID),
+    name: decodeHtml(c.NAME) as string || `Воронка ${c.ID}`,
+  }));
+
+  return {
+    leads: { id: 'leads', name: 'Лиды' },
+    deal_categories: [defaultCategory, ...namedCats],
+  };
+}
+
 // ── Main sync function ─────────────────────────────────────────────────────────
 
 export async function syncBitrix24(
@@ -245,7 +296,12 @@ export async function syncBitrix24(
   const progress = onProgress || (() => {});
   console.log(`[Bitrix24] Syncing ${connection.domain}`);
 
+  // Use granular sync_config if present; otherwise fall back to legacy sync_type
+  const cfg: BitrixSyncConfig | null = connection.sync_config || null;
   const syncType: CrmSyncType = connection.sync_type || 'leads';
+  const syncLeads  = cfg ? cfg.include_leads : (syncType === 'leads' || syncType === 'both');
+  const syncDeals  = cfg ? cfg.deal_category_ids.length > 0 : (syncType === 'deals' || syncType === 'both');
+  const dealCatIds: number[] | null = cfg ? (cfg.deal_category_ids.length > 0 ? cfg.deal_category_ids : null) : null;
 
   // Webhook mode: access_token is empty, domain is the full webhook path
   // e.g. "b24-xxx.bitrix24.ru/rest/1/xxxxxx/"
@@ -284,7 +340,7 @@ export async function syncBitrix24(
   const records: CrmLead[] = [];
 
   // ── Sync Leads ──────────────────────────────────────────────────────────────
-  if (syncType === 'leads' || syncType === 'both') {
+  if (syncLeads) {
     console.log(`[Bitrix24] Fetching leads...`);
     progress('Выгрузка лидов...', 20);
 
@@ -334,21 +390,27 @@ export async function syncBitrix24(
   }
 
   // ── Sync Deals ──────────────────────────────────────────────────────────────
-  if (syncType === 'deals' || syncType === 'both') {
-    console.log(`[Bitrix24] Fetching deals...`);
+  if (syncDeals) {
+    console.log(`[Bitrix24] Fetching deals... categories: ${dealCatIds ? dealCatIds.join(',') : 'all'}`);
     progress('Выгрузка сделок...', 60);
+
+    // If specific categories selected, fetch each separately and merge
+    const dealFilterParams: Record<string, any> = { ...filterParams };
+    if (dealCatIds && dealCatIds.length > 0) {
+      dealFilterParams['CATEGORY_ID'] = dealCatIds;
+    }
 
     const rawDeals = await fetchAllPages<BitrixDeal>(
       baseUrl,
       'crm.deal.list',
       authParams,
       [
-        'ID', 'TITLE', 'STAGE_ID', 'SOURCE_ID',
+        'ID', 'TITLE', 'STAGE_ID', 'CATEGORY_ID', 'SOURCE_ID',
         'ASSIGNED_BY_NAME', 'DATE_CREATE', 'CLOSEDATE',
         'OPPORTUNITY', 'CURRENCY_ID', 'CONTACT_ID',
         'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
       ],
-      filterParams,
+      dealFilterParams,
       (msg) => progress(msg, 65),
     );
 
@@ -419,7 +481,7 @@ export async function syncBitrix24(
   //   2. UTM match (fallback): if a Lead's UTM combination matches a Deal's
   //      UTM combination → duplicate. Handles form leads that have no phone.
   let duplicatesMarked = 0;
-  if (syncType === 'both') {
+  if (syncLeads && syncDeals) {
     console.log(`[Bitrix24] Deduplicating by phone + UTM...`);
     progress('Очищение дублей...', 95);
 

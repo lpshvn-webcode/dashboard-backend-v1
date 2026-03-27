@@ -141,6 +141,12 @@ export interface CreativeStat {
 export type CrmType = 'amocrm' | 'bitrix24';
 export type CrmSyncType = 'leads' | 'deals' | 'both';
 
+/** Granular sync config for Bitrix24 (replaces sync_type) */
+export interface BitrixSyncConfig {
+  include_leads: boolean;       // sync Leads entity
+  deal_category_ids: number[];  // deal pipeline/category IDs to sync (0 = default)
+}
+
 export interface CrmConnection {
   id: string;
   client_id: string;
@@ -150,7 +156,8 @@ export interface CrmConnection {
   refresh_token?: string;
   token_expires_at?: string;
   webhook_secret?: string;
-  sync_type: CrmSyncType;   // 'leads' | 'deals' | 'both' (Bitrix24 only)
+  sync_type: CrmSyncType;   // legacy: 'leads' | 'deals' | 'both' (fallback if sync_config is null)
+  sync_config?: BitrixSyncConfig | null;  // Bitrix24 granular sync config
   is_active: boolean;
   last_synced_at?: string;
   created_at: string;

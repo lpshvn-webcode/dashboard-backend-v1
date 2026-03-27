@@ -3,7 +3,7 @@ import { requireAuth, requireAuthFromQuery } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
 import { syncFacebookAccount } from '../services/facebook';
-import { syncBitrix24 } from '../services/bitrix24';
+import { syncBitrix24, fetchBitrixEntities } from '../services/bitrix24';
 import { syncAmoCRM } from '../services/amocrm';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
@@ -204,7 +204,7 @@ router.get('/crm', requireAuth, async (req, res) => {
 
   const { data, error } = await supabase
     .from('crm_connections')
-    .select('id,type,domain,sync_type,is_active,last_synced_at,created_at')
+    .select('id,type,domain,sync_type,sync_config,is_active,last_synced_at,created_at')
     .eq('client_id', clientId);
 
   if (error) return res.status(500).json({ error: error.message });
@@ -252,6 +252,51 @@ router.delete('/crm/:id', requireAuth, async (req, res) => {
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
   await supabase.from('crm_connections').delete().eq('id', req.params.id);
+  res.json({ ok: true });
+});
+
+// GET /api/connections/crm/:id/bitrix-entities  — fetch available entities from Bitrix24
+router.get('/crm/:id/bitrix-entities', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+
+  const { data: conn } = await supabase
+    .from('crm_connections').select('*').eq('id', req.params.id).single();
+  if (!conn) return res.status(404).json({ error: 'Not found' });
+
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  if (conn.type !== 'bitrix24') return res.status(400).json({ error: 'Only supported for Bitrix24' });
+
+  try {
+    const entities = await fetchBitrixEntities(conn as any);
+    res.json({ data: entities });
+  } catch (err: any) {
+    console.error('[Bitrix entities] Error:', err.message);
+    res.status(500).json({ error: err.message || 'Ошибка при получении сущностей' });
+  }
+});
+
+// PATCH /api/connections/crm/:id/sync-config  — save granular sync config
+router.patch('/crm/:id/sync-config', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const { sync_config } = req.body;
+
+  const { data: conn } = await supabase
+    .from('crm_connections').select('client_id').eq('id', req.params.id).single();
+  if (!conn) return res.status(404).json({ error: 'Not found' });
+
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  const { error } = await supabase
+    .from('crm_connections')
+    .update({ sync_config })
+    .eq('id', req.params.id);
+
+  if (error) return res.status(500).json({ error: error.message });
   res.json({ ok: true });
 });
 
