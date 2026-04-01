@@ -81,14 +81,11 @@ export async function syncFacebookAccount(
   try {
     // ── 1. Campaigns ──────────────────────────────────────────────────────────
     progress('Загрузка кампаний...', 15);
-    // Include ARCHIVED and DELETED campaigns/adsets/ads so that historical data
-    // (e.g. spend from ads deleted after they ran) is not lost on re-sync.
-    // NOTE: Facebook API returns 400 if you combine top-level time_range with
-    // effective_status=['DELETED']. We omit the top-level time_range here —
-    // the insights field already has .time_range(${timeRangeJson}) which
-    // correctly limits which insight rows are returned. Objects with no spend
-    // in the period will have empty insights.data and be skipped in the loop.
-    const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED', 'DELETED']);
+    // Include ARCHIVED campaigns/adsets/ads so that historical data from objects
+    // that were archived after running is not lost on re-sync.
+    // NOTE: Facebook API does NOT support querying DELETED objects via list
+    // endpoints — it returns 400 with "deleted objects not supported".
+    const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED']);
 
     const campaignsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
