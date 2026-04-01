@@ -177,6 +177,47 @@ export async function syncAmoCRM(
   return { leads: leads.length };
 }
 
+// ── Fetch pipeline stages from AmoCRM ──────────────────────────────────────────
+
+export async function fetchAmoCrmStages(connection: CrmConnection): Promise<{
+  pipelines: Array<{ id: string; name: string; type: 'deal' | 'lead'; stages: Array<{ id: string; name: string; semantics: string }> }>
+}> {
+  let accessToken = connection.access_token;
+  if (connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
+    accessToken = await refreshAmoToken(connection);
+  }
+
+  const headers = { Authorization: `Bearer ${accessToken}` };
+  const baseUrl = `https://${connection.domain}/api/v4`;
+
+  const res = await axios.get(`${baseUrl}/leads/pipelines`, {
+    headers,
+    params: { with: 'statuses', limit: 250 },
+    timeout: 15000,
+  });
+
+  const amoPipelines: any[] = res.data?._embedded?.pipelines || [];
+
+  const pipelines = amoPipelines.map((pipeline: any) => {
+    const statuses: Array<{ id: string; name: string; semantics: string }> =
+      (pipeline._embedded?.statuses || []).map((s: any) => ({
+        id: String(s.id),
+        name: String(s.name),
+        // AmoCRM type: 0=normal, 1=won, 2=lost
+        semantics: s.type === 1 ? 'S' : s.type === 2 ? 'F' : '',
+      }));
+
+    return {
+      id: `pipeline_${pipeline.id}`,
+      name: String(pipeline.name),
+      type: 'deal' as const,
+      stages: statuses,
+    };
+  });
+
+  return { pipelines };
+}
+
 // Handle incoming webhook from AmoCRM (real-time updates)
 export function parseAmoWebhook(body: any): Partial<CrmLead> | null {
   const lead = body.leads?.update?.[0] || body.leads?.add?.[0];

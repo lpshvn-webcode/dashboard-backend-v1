@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
+import { syncExchangeRates } from '../services/exchange-rate-service';
 
 const router = Router();
 
@@ -454,6 +455,23 @@ router.post('/build-cross-analytics', requireAuth, async (req, res) => {
       fullRebuild: fullRebuild === 'true',
     });
     res.json({ success: true, ...result });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/stats/sync-exchange-rates?currency=KZT&days=90
+// Sync exchange rates from NBK for the last N days (default 90)
+router.post('/sync-exchange-rates', requireAuth, async (req, res) => {
+  const { currency = 'KZT', days = '90' } = req.query as Record<string, string>;
+  const now = new Date();
+  const dateTo = now.toISOString().substring(0, 10);
+  const dateFrom = new Date(now.getTime() - Number(days) * 24 * 60 * 60 * 1000)
+    .toISOString().substring(0, 10);
+
+  try {
+    const stored = await syncExchangeRates(currency.toUpperCase(), dateFrom, dateTo);
+    res.json({ success: true, currency: currency.toUpperCase(), dateFrom, dateTo, stored });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

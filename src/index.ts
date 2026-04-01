@@ -8,6 +8,7 @@ import connectionsRouter from './routes/connections';
 import cronRouter from './routes/cron';
 import webhooksRouter from './routes/webhooks';
 import { syncAllAdsAccounts, syncAllCrmConnections } from './services/sync-orchestrator';
+import { syncTodayRateForAllClients } from './services/exchange-rate-service';
 
 const app = express();
 
@@ -55,6 +56,17 @@ cron.schedule(`${nightSyncMinute} 0 * * *`, async () => {
   }
 
   console.log('[Scheduler] ── Nightly sync finished ──');
+});
+
+// ── Daily exchange rate sync (08:00 server time) ───────────────────────────────
+cron.schedule('0 8 * * *', async () => {
+  console.log('[Scheduler] Daily exchange rate sync starting...');
+  try {
+    await syncTodayRateForAllClients();
+    console.log('[Scheduler] Exchange rate sync complete');
+  } catch (err: any) {
+    console.error('[Scheduler] Exchange rate sync failed:', err.message);
+  }
 });
 
 // ── Start ──────────────────────────────────────────────────────────────────────

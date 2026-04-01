@@ -315,8 +315,22 @@ export async function fetchBitrixStages(connection: CrmConnection): Promise<{ pi
   const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
 
   const cfg = connection.sync_config as BitrixSyncConfig | null;
-  const categoryIds: number[] = cfg?.deal_category_ids ?? [];
-  const includeLeads: boolean = cfg?.include_leads ?? false;
+  let categoryIds: number[] = cfg?.deal_category_ids ?? [];
+  let includeLeads: boolean = cfg?.include_leads ?? false;
+
+  // If no sync_config configured yet — fetch ALL available pipelines
+  if (!cfg) {
+    try {
+      const entities = await fetchBitrixEntities(connection);
+      categoryIds = entities.deal_categories.map(c => c.id);
+      includeLeads = true;
+    } catch (e) {
+      console.warn('[Bitrix stages] Could not fetch entities for fallback:', (e as any)?.message);
+      // Last resort: just fetch default pipeline
+      categoryIds = [0];
+      includeLeads = true;
+    }
+  }
 
   const pipelines: BitrixPipeline[] = [];
 

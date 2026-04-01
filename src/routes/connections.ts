@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
 import { syncFacebookAccount } from '../services/facebook';
 import { syncBitrix24, fetchBitrixEntities, fetchBitrixStages, fetchBitrixFieldOptions } from '../services/bitrix24';
-import { syncAmoCRM } from '../services/amocrm';
+import { syncAmoCRM, fetchAmoCrmStages } from '../services/amocrm';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
 import axios from 'axios';
@@ -448,10 +448,15 @@ router.get('/crm/:id/stages', requireAuth, async (req, res) => {
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
   try {
-    const result = await fetchBitrixStages(conn as any);
+    let result: { pipelines: any[] };
+    if (conn.type === 'amocrm') {
+      result = await fetchAmoCrmStages(conn as any);
+    } else {
+      result = await fetchBitrixStages(conn as any);
+    }
     res.json(result);
   } catch (err: any) {
-    console.error('[Bitrix stages] Error:', err.message);
+    console.error('[CRM stages] Error:', err.message);
     res.status(500).json({ error: err.message || 'Ошибка при получении стадий' });
   }
 });
@@ -470,10 +475,14 @@ router.get('/crm/:id/field-options', requireAuth, async (req, res) => {
   if (!client) return res.status(403).json({ error: 'Access denied' });
 
   try {
+    if (conn.type === 'amocrm') {
+      // amoCRM doesn't have user-defined enum fields in the same way; return empty
+      return res.json({ options: [] });
+    }
     const result = await fetchBitrixFieldOptions(conn as any, fieldCode);
     res.json(result);
   } catch (err: any) {
-    console.error('[Bitrix field options] Error:', err.message);
+    console.error('[CRM field options] Error:', err.message);
     res.status(500).json({ error: err.message || 'Ошибка при получении вариантов поля' });
   }
 });
