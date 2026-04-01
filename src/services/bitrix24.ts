@@ -447,7 +447,9 @@ export async function fetchBitrixFieldOptions(
       params: { ...authParams, start: 0 }, timeout: 15000,
     });
     const allFields = res.data?.result || [];
-    console.log(`[Bitrix] Deal user fields (${allFields.length}):`, allFields.slice(0, 5).map((f: any) => getFieldLabel(f)));
+    if (allFields.length > 0) {
+      console.log(`[Bitrix] Deal user fields (${allFields.length}), first field structure:`, JSON.stringify(allFields[0]));
+    }
     const field = findByLabel(allFields);
     if (field?.LIST?.length > 0) {
       console.log(`[Bitrix] Found deal field "${field.EDIT_FORM_LABEL}" (${field.FIELD_NAME})`);
