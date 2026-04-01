@@ -2,59 +2,39 @@ import axios from 'axios';
 import { supabase } from '../lib/supabase';
 
 /**
- * Fetches USD→KZT exchange rate from the National Bank of Kazakhstan (NBK).
- * NBK RSS endpoint: https://nationalbank.kz/rss/get_rates.cfm?fdate=DD.MM.YYYY
- * Returns the rate as a number, or null if not available (e.g. weekends/holidays).
+ * Fetches current exchange rate for a given currency pair from exchangerate-api.com (free, no key).
+ * Returns the rate as a number, or null on failure.
  */
-async function fetchNbkRate(date: string): Promise<number | null> {
-  const [year, month, day] = date.split('-');
-  const fdate = `${day}.${month}.${year}`;
+async function fetchCurrentRate(toCurrency: string, fromCurrency = 'USD'): Promise<number | null> {
+  // Primary: exchangerate-api.com (free tier, updated daily)
   try {
-    const res = await axios.get(`https://nationalbank.kz/rss/get_rates.cfm?fdate=${fdate}`, {
-      timeout: 15000,
-      responseType: 'text',   // ensure raw string, not auto-parsed object
-      headers: {
-        'Accept': 'text/xml, application/xml, */*',
-        'User-Agent': 'Mozilla/5.0 (compatible; dashboard-sync/1.0)',
-      },
+    const res = await axios.get(`https://api.exchangerate-api.com/v4/latest/${fromCurrency.toUpperCase()}`, {
+      timeout: 10000,
     });
-    const xml = String(res.data || '');
-    if (!xml) return null;
-
-    // Split by <item> blocks and search for USD entry
-    const itemBlocks = xml.split(/<item[\s>]/i).slice(1);
-    for (const block of itemBlocks) {
-      if (/US Dollar|USD/i.test(block)) {
-        // Handle plain value or CDATA: <description>449.77</description>
-        const match = block.match(/<description[^>]*>(?:<!\[CDATA\[)?\s*([\d.,]+)\s*(?:\]\]>)?<\/description>/i);
-        if (match) {
-          const rate = parseFloat(match[1].replace(',', '.'));
-          if (!isNaN(rate) && rate > 0) return rate;
-        }
-      }
+    const rate = res.data?.rates?.[toCurrency.toUpperCase()];
+    if (rate) {
+      console.log(`[ExchangeRate] Got ${fromCurrency}/${toCurrency} = ${rate} from exchangerate-api.com`);
+      return Number(rate);
     }
-
-    console.warn(`[ExchangeRate] USD not found in NBK XML for ${date}. Response length: ${xml.length}`);
-    return null;
   } catch (err) {
-    console.warn(`[ExchangeRate] Failed to fetch NBK rate for ${date}:`, (err as any)?.message);
-    return null;
+    console.warn('[ExchangeRate] exchangerate-api.com failed:', (err as any)?.message);
   }
-}
 
-/**
- * Fallback: fetch current USD→KZT rate from open.er-api.com (no API key required).
- * Used when NBK doesn't return data for a date (e.g. fresh dates or connectivity issues).
- */
-async function fetchFallbackRate(): Promise<number | null> {
+  // Fallback: open.er-api.com
   try {
-    const res = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 10000 });
-    const rate = res.data?.rates?.KZT;
-    return rate ? Number(rate) : null;
+    const res = await axios.get(`https://open.er-api.com/v6/latest/${fromCurrency.toUpperCase()}`, {
+      timeout: 10000,
+    });
+    const rate = res.data?.rates?.[toCurrency.toUpperCase()];
+    if (rate) {
+      console.log(`[ExchangeRate] Got ${fromCurrency}/${toCurrency} = ${rate} from open.er-api.com`);
+      return Number(rate);
+    }
   } catch (err) {
-    console.warn('[ExchangeRate] Fallback API failed:', (err as any)?.message);
-    return null;
+    console.warn('[ExchangeRate] open.er-api.com failed:', (err as any)?.message);
   }
+
+  return null;
 }
 
 /**
@@ -100,45 +80,21 @@ export async function syncExchangeRates(
     return 0;
   }
 
-  console.log(`[ExchangeRate] Fetching ${datesToFetch.length} dates for ${fromCurrency}/${toCurrency}`);
+  console.log(`[ExchangeRate] Fetching current rate for ${datesToFetch.length} dates (${fromCurrency}/${toCurrency})`);
 
-  // Fetch in parallel batches of 5 to avoid overloading NBK
-  const BATCH = 5;
+  // Fetch current rate once and apply to all missing dates (free APIs don't provide history)
+  const currentRate = await fetchCurrentRate(toCurrency, fromCurrency);
   const rows: Array<{ date: string; from_currency: string; to_currency: string; rate: number; source: string }> = [];
-  let lastKnownRate: number | null = null;
 
-  for (let i = 0; i < datesToFetch.length; i += BATCH) {
-    const batch = datesToFetch.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map(d => fetchNbkRate(d).then(r => ({ date: d, rate: r }))));
-
-    for (const { date, rate } of results) {
-      if (rate !== null) {
-        lastKnownRate = rate;
-        rows.push({ date, from_currency: fromCurrency.toUpperCase(), to_currency: toCurrency.toUpperCase(), rate, source: 'nbk' });
-      } else if (lastKnownRate !== null) {
-        // Weekend / holiday — use last known rate
-        rows.push({ date, from_currency: fromCurrency.toUpperCase(), to_currency: toCurrency.toUpperCase(), rate: lastKnownRate, source: 'nbk_carry' });
-      }
-      // else: no rate and no previous rate yet — skip (very start of history)
-    }
-  }
-
-  // If NBK returned nothing at all (connectivity or parsing issue), try fallback for today's rate
-  // and carry forward for all requested dates
-  if (rows.length === 0) {
-    console.warn('[ExchangeRate] NBK returned 0 rates — trying fallback API');
-    const fallbackRate = await fetchFallbackRate();
-    if (fallbackRate !== null) {
-      console.log(`[ExchangeRate] Fallback rate: ${fromCurrency}/${toCurrency} = ${fallbackRate}`);
-      for (const date of datesToFetch) {
-        rows.push({
-          date,
-          from_currency: fromCurrency.toUpperCase(),
-          to_currency: toCurrency.toUpperCase(),
-          rate: fallbackRate,
-          source: 'fallback',
-        });
-      }
+  if (currentRate !== null) {
+    for (const date of datesToFetch) {
+      rows.push({
+        date,
+        from_currency: fromCurrency.toUpperCase(),
+        to_currency: toCurrency.toUpperCase(),
+        rate: currentRate,
+        source: 'exchangerate-api',
+      });
     }
   }
 

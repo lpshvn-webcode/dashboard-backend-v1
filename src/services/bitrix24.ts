@@ -275,23 +275,34 @@ export async function fetchBitrixEntities(connection: CrmConnection): Promise<Bi
 
   const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
 
-  // Fetch default deal category (ID=0)
-  const defaultCatRes = await axios.get(`${baseUrl}/crm.dealcategory.default.get`, {
-    params: authParams,
-    timeout: 15000,
-  });
-  const defaultCat = defaultCatRes.data?.result;
-  const defaultCategory = { id: 0, name: defaultCat?.NAME ? decodeHtml(defaultCat.NAME) as string : 'Основная воронка' };
+  // Fetch default deal category (ID=0) — may return 404 in some Bitrix24 editions
+  let defaultCategoryName = 'Основная воронка';
+  try {
+    const defaultCatRes = await axios.get(`${baseUrl}/crm.dealcategory.default.get`, {
+      params: authParams,
+      timeout: 10000,
+    });
+    const name = defaultCatRes.data?.result?.NAME;
+    if (name) defaultCategoryName = decodeHtml(name) as string;
+  } catch {
+    // Method not available — use default name
+  }
+  const defaultCategory = { id: 0, name: defaultCategoryName };
 
   // Fetch all named deal categories
-  const namedCatsRes = await axios.get(`${baseUrl}/crm.dealcategory.list`, {
-    params: authParams,
-    timeout: 15000,
-  });
-  const namedCats: Array<{ id: number; name: string }> = (namedCatsRes.data?.result || []).map((c: any) => ({
-    id: Number(c.ID),
-    name: decodeHtml(c.NAME) as string || `Воронка ${c.ID}`,
-  }));
+  let namedCats: Array<{ id: number; name: string }> = [];
+  try {
+    const namedCatsRes = await axios.get(`${baseUrl}/crm.dealcategory.list`, {
+      params: authParams,
+      timeout: 10000,
+    });
+    namedCats = (namedCatsRes.data?.result || []).map((c: any) => ({
+      id: Number(c.ID),
+      name: decodeHtml(c.NAME) as string || `Воронка ${c.ID}`,
+    }));
+  } catch {
+    // Method not available — no additional pipelines
+  }
 
   return {
     leads: { id: 'leads', name: 'Лиды' },
@@ -339,13 +350,16 @@ export async function fetchBitrixStages(connection: CrmConnection): Promise<{ pi
     let pipelineName = `Воронка ${catId}`;
 
     if (catId === 0) {
-      const [stagesRes, defCatRes] = await Promise.all([
-        axios.get(`${baseUrl}/crm.status.list`, {
-          params: { ...authParams, filter: { ENTITY_ID: 'DEAL_STAGE' } }, timeout: 15000,
-        }),
-        axios.get(`${baseUrl}/crm.dealcategory.default.get`, { params: authParams, timeout: 15000 }),
-      ]);
-      pipelineName = decodeHtml(defCatRes.data?.result?.NAME) || 'Основная воронка';
+      const stagesRes = await axios.get(`${baseUrl}/crm.status.list`, {
+        params: { ...authParams, filter: { ENTITY_ID: 'DEAL_STAGE' } }, timeout: 15000,
+      });
+      // crm.dealcategory.default.get may return 404 on some Bitrix24 editions
+      try {
+        const defCatRes = await axios.get(`${baseUrl}/crm.dealcategory.default.get`, { params: authParams, timeout: 15000 });
+        pipelineName = decodeHtml(defCatRes.data?.result?.NAME) || 'Основная воронка';
+      } catch {
+        pipelineName = 'Основная воронка';
+      }
       stages = (stagesRes.data?.result || []).map((s: any) => ({
         id: s.STATUS_ID as string,
         name: (decodeHtml(s.NAME) || s.STATUS_ID) as string,
