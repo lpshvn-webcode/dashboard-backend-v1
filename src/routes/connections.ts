@@ -7,8 +7,163 @@ import { syncBitrix24, fetchBitrixEntities } from '../services/bitrix24';
 import { syncAmoCRM } from '../services/amocrm';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
+import axios from 'axios';
+import crypto from 'crypto';
 
 const router = Router();
+
+// ── Facebook OAuth ──────────────────────────────────────────────────────────────
+
+const FB_API_VERSION = 'v19.0';
+
+// In-memory OAuth state store (TTL: 10 minutes)
+const oauthStates = new Map<string, { userId: string; clientId: string; expires: number }>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of oauthStates.entries()) {
+    if (val.expires < now) oauthStates.delete(key);
+  }
+}, 60_000);
+
+/** HTML page sent after OAuth callback — sends postMessage to opener and closes popup */
+function oauthCallbackHtml(payload: object): string {
+  const json = JSON.stringify(payload);
+  return `<!DOCTYPE html><html><body><script>
+    try { window.opener.postMessage(${json}, '*'); } catch(e) {}
+    window.close();
+  </script></body></html>`;
+}
+
+// GET /api/connections/facebook/oauth/start?token=...&clientId=...
+// Opens FB OAuth dialog (called from a popup window, auth via query token)
+router.get('/facebook/oauth/start', requireAuthFromQuery, async (req, res) => {
+  const { clientId } = req.query as Record<string, string>;
+  const userId = (req as any).user.id;
+
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', clientId).eq('user_id', userId).single();
+  if (!client) return res.status(403).send('Access denied');
+
+  const state = crypto.randomUUID();
+  oauthStates.set(state, { userId, clientId, expires: Date.now() + 10 * 60 * 1000 });
+
+  const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3001}`;
+  const params = new URLSearchParams({
+    client_id: process.env.FACEBOOK_APP_ID!,
+    redirect_uri: `${backendUrl}/api/connections/facebook/oauth/callback`,
+    scope: 'ads_read',
+    response_type: 'code',
+    state,
+  });
+
+  res.redirect(`https://www.facebook.com/${FB_API_VERSION}/dialog/oauth?${params}`);
+});
+
+// GET /api/connections/facebook/oauth/callback
+// FB redirects here after user authorizes. Exchanges code for long-lived token,
+// fetches available ad accounts, sends result via postMessage to the opener popup.
+router.get('/facebook/oauth/callback', async (req, res) => {
+  const { code, state, error: fbError } = req.query as Record<string, string>;
+
+  if (fbError || !code || !state) {
+    return res.send(oauthCallbackHtml({ error: fbError || 'OAuth cancelled' }));
+  }
+
+  const stateData = oauthStates.get(state);
+  if (!stateData || stateData.expires < Date.now()) {
+    return res.send(oauthCallbackHtml({ error: 'Invalid or expired OAuth state' }));
+  }
+  oauthStates.delete(state);
+
+  try {
+    const backendUrl = process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3001}`;
+    const redirectUri = `${backendUrl}/api/connections/facebook/oauth/callback`;
+
+    // 1. Exchange code → short-lived token
+    const tokenRes = await axios.get(`https://graph.facebook.com/${FB_API_VERSION}/oauth/access_token`, {
+      params: {
+        client_id: process.env.FACEBOOK_APP_ID,
+        client_secret: process.env.FACEBOOK_APP_SECRET,
+        redirect_uri: redirectUri,
+        code,
+      },
+    });
+    const shortToken: string = tokenRes.data.access_token;
+
+    // 2. Exchange short-lived → long-lived token (~60 days)
+    const longTokenRes = await axios.get(`https://graph.facebook.com/${FB_API_VERSION}/oauth/access_token`, {
+      params: {
+        grant_type: 'fb_exchange_token',
+        client_id: process.env.FACEBOOK_APP_ID,
+        client_secret: process.env.FACEBOOK_APP_SECRET,
+        fb_exchange_token: shortToken,
+      },
+    });
+    const longToken: string = longTokenRes.data.access_token;
+    const expiresIn: number = longTokenRes.data.expires_in; // seconds (~5184000 = 60 days)
+
+    // 3. Fetch all ad accounts the user has access to
+    const accountsRes = await axios.get(`https://graph.facebook.com/${FB_API_VERSION}/me/adaccounts`, {
+      params: {
+        access_token: longToken,
+        fields: 'account_id,name,currency,account_status,business',
+        limit: 100,
+      },
+    });
+    const accounts: Array<{ account_id: string; name: string; currency: string; account_status: number }> =
+      accountsRes.data.data || [];
+
+    return res.send(oauthCallbackHtml({
+      ok: true,
+      accessToken: longToken,
+      expiresIn,
+      clientId: stateData.clientId,
+      accounts,
+    }));
+  } catch (err: any) {
+    const msg = err.response?.data?.error?.message || err.message || 'OAuth error';
+    console.error('[FB OAuth] Callback error:', msg);
+    return res.send(oauthCallbackHtml({ error: msg }));
+  }
+});
+
+// POST /api/connections/facebook/oauth/save-accounts
+// Body: { clientId, accountIds: string[], accessToken: string, expiresIn: number }
+// Saves selected ad accounts to the database
+router.post('/facebook/oauth/save-accounts', requireAuth, async (req, res) => {
+  const { clientId, accountIds, accessToken, expiresIn } = req.body as {
+    clientId: string;
+    accountIds: string[];
+    accessToken: string;
+    expiresIn: number;
+  };
+  const userId = (req as any).user.id;
+
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', clientId).eq('user_id', userId).single();
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  const tokenExpiresAt = expiresIn
+    ? new Date(Date.now() + expiresIn * 1000).toISOString()
+    : new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(); // 60 days fallback
+
+  const records = accountIds.map(accountId => ({
+    client_id: clientId,
+    platform: 'facebook',
+    account_id: accountId.replace(/^act_/, ''),
+    account_name: `act_${accountId.replace(/^act_/, '')}`,
+    access_token: accessToken,
+    token_expires_at: tokenExpiresAt,
+    is_active: true,
+  }));
+
+  const { error } = await supabase
+    .from('ad_accounts')
+    .upsert(records, { onConflict: 'client_id,platform,account_id' });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true, saved: records.length });
+});
 
 // ── Ad Accounts ────────────────────────────────────────────────────────────────
 
