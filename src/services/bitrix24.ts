@@ -426,12 +426,19 @@ export async function fetchBitrixFieldOptions(
 
   const searchLower = fieldName.toLowerCase().trim();
 
+  // Helper: extract human-readable label from field — Bitrix24 may return
+  // EDIT_FORM_LABEL as a multilingual object { ru: '...', en: '...' } or plain string
+  function getFieldLabel(f: any): string {
+    const raw = f.EDIT_FORM_LABEL || f.LIST_COLUMN_LABEL || f.FIELD_NAME || '';
+    if (raw && typeof raw === 'object') {
+      return String(raw['ru'] || raw['en'] || Object.values(raw)[0] || '');
+    }
+    return String(raw);
+  }
+
   // Helper: find matching field by label (case-insensitive substring)
   function findByLabel(fields: any[]): any | null {
-    return fields.find(f => {
-      const label = String(f.EDIT_FORM_LABEL || f.LIST_COLUMN_LABEL || f.FIELD_NAME || '').toLowerCase();
-      return label.includes(searchLower);
-    }) || null;
+    return fields.find(f => getFieldLabel(f).toLowerCase().includes(searchLower)) || null;
   }
 
   // 1. Search deal user fields (UF_CRM_*)
@@ -439,7 +446,9 @@ export async function fetchBitrixFieldOptions(
     const res = await axios.get(`${baseUrl}/crm.deal.userfield.list`, {
       params: { ...authParams, start: 0 }, timeout: 15000,
     });
-    const field = findByLabel(res.data?.result || []);
+    const allFields = res.data?.result || [];
+    console.log(`[Bitrix] Deal user fields (${allFields.length}):`, allFields.slice(0, 5).map((f: any) => getFieldLabel(f)));
+    const field = findByLabel(allFields);
     if (field?.LIST?.length > 0) {
       console.log(`[Bitrix] Found deal field "${field.EDIT_FORM_LABEL}" (${field.FIELD_NAME})`);
       return {
