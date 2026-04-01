@@ -181,6 +181,7 @@ export interface CrmLead {
   phone?: string;           // Phone number for deduplication
   record_type?: string;     // 'lead' or 'deal'
   is_duplicate?: boolean;   // Marked if same phone exists in both leads and deals
+  mql_reason?: string;      // Value of the MQL custom field (e.g. rejection reason)
   // UTM params for cross-analytics
   utm_source?: string;
   utm_medium?: string;
