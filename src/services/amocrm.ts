@@ -219,32 +219,44 @@ export async function fetchAmoCrmStages(connection: CrmConnection): Promise<{
 }
 
 /**
- * Fetch enum options for a custom field by its numeric ID.
- * Calls GET /api/v4/leads/custom_fields/{id}
- * Returns options array like [{ id: '1', value: 'Причина 1' }]
+ * Fetch enum options for a custom field by its name (case-insensitive substring search).
+ * Calls GET /api/v4/leads/custom_fields to list all fields, finds the matching one by name,
+ * then returns its enum values.
  */
 export async function fetchAmoCrmFieldOptions(
   connection: CrmConnection,
-  fieldId: string,
+  fieldName: string,
 ): Promise<{ options: Array<{ id: string; value: string }> }> {
   let accessToken = connection.access_token;
   if (connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
     accessToken = await refreshAmoToken(connection);
   }
 
-  const res = await axios.get(`https://${connection.domain}/api/v4/leads/custom_fields/${fieldId}`, {
+  const searchLower = fieldName.toLowerCase().trim();
+
+  // Fetch all custom fields for leads
+  const res = await axios.get(`https://${connection.domain}/api/v4/leads/custom_fields`, {
     headers: { Authorization: `Bearer ${accessToken}` },
+    params: { limit: 250 },
     timeout: 15000,
   });
 
-  const field = res.data;
-  const values: any[] = field?.values || field?._embedded?.values || [];
-  const options = values.map((v: any) => ({
-    id: String(v.id ?? v.enum_id ?? v.value),
-    value: String(v.value),
-  }));
+  const fields: any[] = res.data?._embedded?.custom_fields || [];
+  const field = fields.find(f => String(f.name || '').toLowerCase().includes(searchLower));
 
-  return { options };
+  if (!field) {
+    console.warn(`[AmoCRM] No custom field with name containing "${fieldName}"`);
+    return { options: [] };
+  }
+
+  console.log(`[AmoCRM] Found field "${field.name}" (id=${field.id})`);
+  const values: any[] = field.values || [];
+  return {
+    options: values.map((v: any) => ({
+      id: String(v.id ?? v.enum_id ?? v.value),
+      value: String(v.value),
+    })),
+  };
 }
 
 // Handle incoming webhook from AmoCRM (real-time updates)

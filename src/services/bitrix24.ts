@@ -406,11 +406,11 @@ export async function fetchBitrixStages(connection: CrmConnection): Promise<{ pi
   return { pipelines };
 }
 
-// ── Fetch enum options for a custom field ──────────────────────────────────────
+// ── Fetch enum options by field name (search across deal + lead user fields) ────
 
 export async function fetchBitrixFieldOptions(
   connection: CrmConnection,
-  fieldCode: string,
+  fieldName: string,  // human-readable field name to search by
 ): Promise<{ options: Array<{ id: string; value: string }> }> {
   const isWebhook = !connection.access_token;
   let accessToken = connection.access_token;
@@ -424,51 +424,45 @@ export async function fetchBitrixFieldOptions(
   }
   const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
 
-  // User field (UF_*): fetch via crm.deal.userfield.list or crm.lead.userfield.list
-  const entityMethod = fieldCode.toUpperCase().startsWith('UF_') ? 'crm.deal.userfield.list' : null;
+  const searchLower = fieldName.toLowerCase().trim();
 
-  if (entityMethod) {
-    try {
-      const res = await axios.get(`${baseUrl}/${entityMethod}`, {
-        params: { ...authParams, filter: { FIELD_NAME: fieldCode } }, timeout: 15000,
-      });
-      const field = (res.data?.result || [])[0];
-      if (field?.LIST) {
-        return {
-          options: (field.LIST as any[]).map(item => ({
-            id: String(item.ID),
-            value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
-          })),
-        };
-      }
-    } catch (e) {
-      console.warn(`[Bitrix] crm.deal.userfield.list failed for ${fieldCode}, trying crm.lead.userfield.list`);
-    }
-
-    // Fallback: lead userfield
-    try {
-      const res = await axios.get(`${baseUrl}/crm.lead.userfield.list`, {
-        params: { ...authParams, filter: { FIELD_NAME: fieldCode } }, timeout: 15000,
-      });
-      const field = (res.data?.result || [])[0];
-      if (field?.LIST) {
-        return {
-          options: (field.LIST as any[]).map(item => ({
-            id: String(item.ID),
-            value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
-          })),
-        };
-      }
-    } catch { /* ignore */ }
+  // Helper: find matching field by label (case-insensitive substring)
+  function findByLabel(fields: any[]): any | null {
+    return fields.find(f => {
+      const label = String(f.EDIT_FORM_LABEL || f.LIST_COLUMN_LABEL || f.FIELD_NAME || '').toLowerCase();
+      return label.includes(searchLower);
+    }) || null;
   }
 
-  // Standard field: try crm.deal.fields
+  // 1. Search deal user fields (UF_CRM_*)
   try {
-    const res = await axios.get(`${baseUrl}/crm.deal.fields`, { params: authParams, timeout: 15000 });
-    const field = res.data?.result?.[fieldCode];
-    if (field?.items) {
+    const res = await axios.get(`${baseUrl}/crm.deal.userfield.list`, {
+      params: { ...authParams, start: 0 }, timeout: 15000,
+    });
+    const field = findByLabel(res.data?.result || []);
+    if (field?.LIST?.length > 0) {
+      console.log(`[Bitrix] Found deal field "${field.EDIT_FORM_LABEL}" (${field.FIELD_NAME})`);
       return {
-        options: (field.items as any[]).map(item => ({
+        options: (field.LIST as any[]).map((item: any) => ({
+          id: String(item.ID),
+          value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
+        })),
+      };
+    }
+  } catch (e) {
+    console.warn('[Bitrix] crm.deal.userfield.list failed:', (e as any)?.message);
+  }
+
+  // 2. Search lead user fields
+  try {
+    const res = await axios.get(`${baseUrl}/crm.lead.userfield.list`, {
+      params: { ...authParams, start: 0 }, timeout: 15000,
+    });
+    const field = findByLabel(res.data?.result || []);
+    if (field?.LIST?.length > 0) {
+      console.log(`[Bitrix] Found lead field "${field.EDIT_FORM_LABEL}" (${field.FIELD_NAME})`);
+      return {
+        options: (field.LIST as any[]).map((item: any) => ({
           id: String(item.ID),
           value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
         })),
@@ -476,6 +470,7 @@ export async function fetchBitrixFieldOptions(
     }
   } catch { /* ignore */ }
 
+  console.warn(`[Bitrix] No field with label containing "${fieldName}" found`);
   return { options: [] };
 }
 
