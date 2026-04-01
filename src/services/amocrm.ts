@@ -218,6 +218,35 @@ export async function fetchAmoCrmStages(connection: CrmConnection): Promise<{
   return { pipelines };
 }
 
+/**
+ * Fetch enum options for a custom field by its numeric ID.
+ * Calls GET /api/v4/leads/custom_fields/{id}
+ * Returns options array like [{ id: '1', value: 'Причина 1' }]
+ */
+export async function fetchAmoCrmFieldOptions(
+  connection: CrmConnection,
+  fieldId: string,
+): Promise<{ options: Array<{ id: string; value: string }> }> {
+  let accessToken = connection.access_token;
+  if (connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
+    accessToken = await refreshAmoToken(connection);
+  }
+
+  const res = await axios.get(`https://${connection.domain}/api/v4/leads/custom_fields/${fieldId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    timeout: 15000,
+  });
+
+  const field = res.data;
+  const values: any[] = field?.values || field?._embedded?.values || [];
+  const options = values.map((v: any) => ({
+    id: String(v.id ?? v.enum_id ?? v.value),
+    value: String(v.value),
+  }));
+
+  return { options };
+}
+
 // Handle incoming webhook from AmoCRM (real-time updates)
 export function parseAmoWebhook(body: any): Partial<CrmLead> | null {
   const lead = body.leads?.update?.[0] || body.leads?.add?.[0];

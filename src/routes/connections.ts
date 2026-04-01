@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
 import { syncFacebookAccount } from '../services/facebook';
 import { syncBitrix24, fetchBitrixEntities, fetchBitrixStages, fetchBitrixFieldOptions } from '../services/bitrix24';
-import { syncAmoCRM, fetchAmoCrmStages } from '../services/amocrm';
+import { syncAmoCRM, fetchAmoCrmStages, fetchAmoCrmFieldOptions } from '../services/amocrm';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
 import axios from 'axios';
@@ -476,8 +476,8 @@ router.get('/crm/:id/field-options', requireAuth, async (req, res) => {
 
   try {
     if (conn.type === 'amocrm') {
-      // amoCRM doesn't have user-defined enum fields in the same way; return empty
-      return res.json({ options: [] });
+      const result = await fetchAmoCrmFieldOptions(conn as any, fieldCode);
+      return res.json(result);
     }
     const result = await fetchBitrixFieldOptions(conn as any, fieldCode);
     res.json(result);
