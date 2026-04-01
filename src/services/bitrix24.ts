@@ -366,26 +366,22 @@ export async function fetchBitrixStages(connection: CrmConnection): Promise<{ pi
         semantics: (s.SEMANTICS || '') as string,
       }));
     } else {
-      try {
-        const [stagesRes, catRes] = await Promise.all([
-          axios.get(`${baseUrl}/crm.dealcategory.stages`, {
-            params: { ...authParams, id: catId }, timeout: 15000,
-          }),
-          axios.get(`${baseUrl}/crm.dealcategory.get`, {
-            params: { ...authParams, id: catId }, timeout: 15000,
-          }),
-        ]);
-        pipelineName = decodeHtml(catRes.data?.result?.NAME) || `Воронка ${catId}`;
-        stages = (stagesRes.data?.result || []).map((s: any) => ({
-          id: s.STATUS_ID as string,
-          name: (decodeHtml(s.NAME) || s.STATUS_ID) as string,
-          semantics: (s.SEMANTICS || '') as string,
-        }));
-      } catch (e) {
-        console.warn(`[Bitrix stages] Could not fetch stages for category ${catId}:`, (e as any)?.message);
-        // Skip this category if API returns 404 or other error
-        continue;
-      }
+      // Use crm.status.list with ENTITY_ID='DEAL_STAGE_{id}' — universal Bitrix24 method
+      // crm.dealcategory.stages is non-standard and returns 404 on many editions
+      const [stagesRes, catRes] = await Promise.all([
+        axios.get(`${baseUrl}/crm.status.list`, {
+          params: { ...authParams, filter: { ENTITY_ID: `DEAL_STAGE_${catId}` } }, timeout: 15000,
+        }),
+        axios.get(`${baseUrl}/crm.dealcategory.get`, {
+          params: { ...authParams, id: catId }, timeout: 15000,
+        }).catch(() => ({ data: { result: null } })),
+      ]);
+      pipelineName = decodeHtml(catRes.data?.result?.NAME) || `Воронка ${catId}`;
+      stages = (stagesRes.data?.result || []).map((s: any) => ({
+        id: s.STATUS_ID as string,
+        name: (decodeHtml(s.NAME) || s.STATUS_ID) as string,
+        semantics: (s.SEMANTICS || '') as string,
+      }));
     }
 
     pipelines.push({ id: `deal_${catId}`, name: pipelineName, type: 'deal', stages });
