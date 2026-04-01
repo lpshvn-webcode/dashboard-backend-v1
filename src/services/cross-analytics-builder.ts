@@ -261,16 +261,43 @@ export async function buildCrossAnalytics(
   //
   // This avoids 2× inflation without requiring per-client configuration.
 
-  const { count: matchedLeadCount } = await supabase
-    .from('crm_leads')
-    .select('id', { count: 'exact', head: true })
+  // Determine which record_type(s) to count based on the client's CRM sync_config.
+  //
+  // sync_config reflects what the user explicitly chose to sync in the UI:
+  //   • include_leads=false, deal_category_ids=[...] → only deals
+  //   • include_leads=true,  deal_category_ids=[]    → only leads
+  //   • include_leads=true,  deal_category_ids=[...] → both (is_duplicate handles dedup)
+  //   • no sync_config (legacy sync_type)            → fallback to range-count heuristic
+  //
+  const { data: crmConns } = await supabase
+    .from('crm_connections')
+    .select('sync_config, sync_type')
     .eq('client_id', clientId)
-    .eq('record_type', 'lead')
-    .not('matched_campaign_id', 'is', null)
-    .eq('is_duplicate', false);
+    .eq('is_active', true);
 
-  const useLeadsOnly = (matchedLeadCount || 0) > 0;
-  console.log(`[CrossBuilder] Matched leads: ${matchedLeadCount ?? 0} → ${useLeadsOnly ? 'counting LEADS only' : 'counting all records (no leads with match)'}`);
+  let recordTypeFilter: 'lead' | 'deal' | null = null; // null = no filter (count both)
+
+  if (crmConns && crmConns.length > 0) {
+    // Pick the first active connection that has explicit sync_config
+    const connWithConfig = crmConns.find((c: any) => c.sync_config != null);
+    if (connWithConfig?.sync_config) {
+      const cfg = connWithConfig.sync_config as { include_leads: boolean; deal_category_ids: number[] };
+      if (!cfg.include_leads && cfg.deal_category_ids.length > 0) {
+        recordTypeFilter = 'deal';
+      } else if (cfg.include_leads && cfg.deal_category_ids.length === 0) {
+        recordTypeFilter = 'lead';
+      }
+      // else: both selected → no filter, is_duplicate handles dedup
+    } else {
+      // Legacy sync_type fallback
+      const syncType = crmConns[0].sync_type as string | null;
+      if (syncType === 'leads') recordTypeFilter = 'lead';
+      else if (syncType === 'deals') recordTypeFilter = 'deal';
+      // 'both' → no filter
+    }
+  }
+
+  console.log(`[CrossBuilder] record_type filter: ${recordTypeFilter ?? 'none (both)'}`);
 
   const leads = await paginatedSelect(
     'crm_leads',
@@ -278,12 +305,12 @@ export async function buildCrossAnalytics(
     'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, is_duplicate',
     (q) => {
       let q2 = q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false);
-      if (useLeadsOnly) q2 = q2.eq('record_type', 'lead');
+      if (recordTypeFilter) q2 = q2.eq('record_type', recordTypeFilter);
       return q2;
     },
   );
 
-  console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM ${useLeadsOnly ? 'leads' : 'records'}`);
+  console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM records`);
 
   let leadsAttributed = 0;
   let leadsUnattributed = 0;
