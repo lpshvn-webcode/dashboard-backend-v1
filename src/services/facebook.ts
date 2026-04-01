@@ -82,13 +82,17 @@ export async function syncFacebookAccount(
     // ── 1. Campaigns ──────────────────────────────────────────────────────────
     progress('Загрузка кампаний...', 15);
     // Include ARCHIVED and DELETED campaigns/adsets/ads so that historical data
-    // (e.g. spend from ads that have since been deleted) is not lost on re-sync.
+    // (e.g. spend from ads deleted after they ran) is not lost on re-sync.
+    // NOTE: Facebook API returns 400 if you combine top-level time_range with
+    // effective_status=['DELETED']. We omit the top-level time_range here —
+    // the insights field already has .time_range(${timeRangeJson}) which
+    // correctly limits which insight rows are returned. Objects with no spend
+    // in the period will have empty insights.data and be skipped in the loop.
     const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED', 'DELETED']);
 
     const campaignsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
       fields: `id,name,status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-      time_range: timeRange,
       effective_status: allStatuses,
       limit: '200',
     });
@@ -142,7 +146,6 @@ export async function syncFacebookAccount(
     const adsetsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/adsets`, {
       access_token: account.access_token,
       fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-      time_range: timeRange,
       effective_status: allStatuses,
       limit: '500',
     });
@@ -200,7 +203,6 @@ export async function syncFacebookAccount(
     const adsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/ads`, {
       access_token: account.access_token,
       fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-      time_range: timeRange,
       effective_status: allStatuses,
       limit: '500',
     });
