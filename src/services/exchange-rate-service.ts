@@ -11,21 +11,48 @@ async function fetchNbkRate(date: string): Promise<number | null> {
   const fdate = `${day}.${month}.${year}`;
   try {
     const res = await axios.get(`https://nationalbank.kz/rss/get_rates.cfm?fdate=${fdate}`, {
-      timeout: 10000,
-      headers: { 'Accept': 'application/xml, text/xml' },
+      timeout: 15000,
+      responseType: 'text',   // ensure raw string, not auto-parsed object
+      headers: {
+        'Accept': 'text/xml, application/xml, */*',
+        'User-Agent': 'Mozilla/5.0 (compatible; dashboard-sync/1.0)',
+      },
     });
-    const xml: string = typeof res.data === 'string' ? res.data : '';
-    // Split by <item> and look for the US Dollar block
-    const items = xml.split('<item>').slice(1);
-    for (const item of items) {
-      if (item.includes('US Dollar') || item.includes('Доллар США') || item.includes('доллар')) {
-        const match = item.match(/<description>([\d.]+)<\/description>/);
-        if (match) return parseFloat(match[1]);
+    const xml = String(res.data || '');
+    if (!xml) return null;
+
+    // Split by <item> blocks and search for USD entry
+    const itemBlocks = xml.split(/<item[\s>]/i).slice(1);
+    for (const block of itemBlocks) {
+      if (/US Dollar|USD/i.test(block)) {
+        // Handle plain value or CDATA: <description>449.77</description>
+        const match = block.match(/<description[^>]*>(?:<!\[CDATA\[)?\s*([\d.,]+)\s*(?:\]\]>)?<\/description>/i);
+        if (match) {
+          const rate = parseFloat(match[1].replace(',', '.'));
+          if (!isNaN(rate) && rate > 0) return rate;
+        }
       }
     }
+
+    console.warn(`[ExchangeRate] USD not found in NBK XML for ${date}. Response length: ${xml.length}`);
     return null;
   } catch (err) {
     console.warn(`[ExchangeRate] Failed to fetch NBK rate for ${date}:`, (err as any)?.message);
+    return null;
+  }
+}
+
+/**
+ * Fallback: fetch current USD→KZT rate from open.er-api.com (no API key required).
+ * Used when NBK doesn't return data for a date (e.g. fresh dates or connectivity issues).
+ */
+async function fetchFallbackRate(): Promise<number | null> {
+  try {
+    const res = await axios.get('https://open.er-api.com/v6/latest/USD', { timeout: 10000 });
+    const rate = res.data?.rates?.KZT;
+    return rate ? Number(rate) : null;
+  } catch (err) {
+    console.warn('[ExchangeRate] Fallback API failed:', (err as any)?.message);
     return null;
   }
 }
@@ -93,6 +120,25 @@ export async function syncExchangeRates(
         rows.push({ date, from_currency: fromCurrency.toUpperCase(), to_currency: toCurrency.toUpperCase(), rate: lastKnownRate, source: 'nbk_carry' });
       }
       // else: no rate and no previous rate yet — skip (very start of history)
+    }
+  }
+
+  // If NBK returned nothing at all (connectivity or parsing issue), try fallback for today's rate
+  // and carry forward for all requested dates
+  if (rows.length === 0) {
+    console.warn('[ExchangeRate] NBK returned 0 rates — trying fallback API');
+    const fallbackRate = await fetchFallbackRate();
+    if (fallbackRate !== null) {
+      console.log(`[ExchangeRate] Fallback rate: ${fromCurrency}/${toCurrency} = ${fallbackRate}`);
+      for (const date of datesToFetch) {
+        rows.push({
+          date,
+          from_currency: fromCurrency.toUpperCase(),
+          to_currency: toCurrency.toUpperCase(),
+          rate: fallbackRate,
+          source: 'fallback',
+        });
+      }
     }
   }
 
