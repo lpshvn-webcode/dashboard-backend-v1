@@ -110,7 +110,7 @@ router.get('/facebook/oauth/callback', async (req, res) => {
         limit: 100,
       },
     });
-    const accounts: Array<{ account_id: string; name: string; currency: string; account_status: number }> =
+    const accounts: Array<{ account_id: string; name: string; currency: string; account_status: number; business?: { id: string; name: string } }> =
       accountsRes.data.data || [];
 
     return res.send(oauthCallbackHtml({
@@ -147,15 +147,19 @@ router.post('/facebook/oauth/save-accounts', requireAuth, async (req, res) => {
     ? new Date(Date.now() + expiresIn * 1000).toISOString()
     : new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(); // 60 days fallback
 
-  const records = accountIds.map(accountId => ({
-    client_id: clientId,
-    platform: 'facebook',
-    account_id: accountId.replace(/^act_/, ''),
-    account_name: `act_${accountId.replace(/^act_/, '')}`,
-    access_token: accessToken,
-    token_expires_at: tokenExpiresAt,
-    is_active: true,
-  }));
+  const { accountNames = {} } = req.body as { accountNames?: Record<string, string> };
+  const records = accountIds.map(accountId => {
+    const cleanId = accountId.replace(/^act_/, '');
+    return {
+      client_id: clientId,
+      platform: 'facebook',
+      account_id: cleanId,
+      account_name: accountNames[cleanId] || accountNames[accountId] || cleanId,
+      access_token: accessToken,
+      token_expires_at: tokenExpiresAt,
+      is_active: true,
+    };
+  });
 
   const { error } = await supabase
     .from('ad_accounts')
