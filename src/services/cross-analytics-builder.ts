@@ -299,10 +299,24 @@ export async function buildCrossAnalytics(
 
   console.log(`[CrossBuilder] record_type filter: ${recordTypeFilter ?? 'none (both)'}`);
 
+  // ── Load client stage & MQL config ─────────────────────────────────────────
+  const { data: clientData } = await supabase
+    .from('clients').select('settings').eq('id', clientId).single();
+  const settings = (clientData?.settings as any) || {};
+  const allStages: Array<{ id: string; isQualified?: boolean; isSale?: boolean }> =
+    settings.dealStages || settings.leadStages || [];
+  const qualifiedStageIds = new Set(allStages.filter(s => s.isQualified).map(s => s.id));
+  const saleStageIds = new Set(allStages.filter(s => s.isSale).map(s => s.id));
+  const mqlReasons: string[] = settings.mqlReasons || [];
+
+  console.log(
+    `[CrossBuilder] Stage config: ${qualifiedStageIds.size} qualified stages, ${saleStageIds.size} sale stages, ${mqlReasons.length} MQL reasons`
+  );
+
   const leads = await paginatedSelect(
     'crm_leads',
     clientId,
-    'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, is_duplicate',
+    'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, mql_reason, is_duplicate',
     (q) => {
       let q2 = q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false);
       if (recordTypeFilter) q2 = q2.eq('record_type', recordTypeFilter);
@@ -379,7 +393,15 @@ export async function buildCrossAnalytics(
     if (target) {
       target.leads_crm += 1;
       target.revenue += Number(lead.price) || 0;
-      // TODO: qualified_leads and sales_count based on client stage config
+
+      // Qualified: stage is marked qualified, OR MQL reason matches
+      const isQualifiedByStage = lead.status && qualifiedStageIds.has(lead.status);
+      const isQualifiedByMql = mqlReasons.length > 0 && lead.mql_reason && mqlReasons.includes(lead.mql_reason);
+      if (isQualifiedByStage || isQualifiedByMql) target.qualified_leads += 1;
+
+      // Sale: stage is marked as sale
+      if (lead.status && saleStageIds.has(lead.status)) target.sales_count += 1;
+
       leadsAttributed++;
     } else {
       leadsUnattributed++;

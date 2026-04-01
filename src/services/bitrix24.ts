@@ -242,6 +242,19 @@ export interface BitrixEntityList {
   deal_categories: Array<{ id: number; name: string }>;
 }
 
+export interface BitrixPipelineStage {
+  id: string;      // Bitrix stage ID, e.g. "C9:WON", "NEW"
+  name: string;
+  semantics: string; // '' = normal, 'S' = won, 'F' = lost
+}
+
+export interface BitrixPipeline {
+  id: string;        // 'deal_0', 'deal_9', 'leads'
+  name: string;
+  type: 'deal' | 'lead';
+  stages: BitrixPipelineStage[];
+}
+
 export async function fetchBitrixEntities(connection: CrmConnection): Promise<BitrixEntityList> {
   const isWebhook = !connection.access_token;
 
@@ -286,6 +299,152 @@ export async function fetchBitrixEntities(connection: CrmConnection): Promise<Bi
   };
 }
 
+// ── Fetch stages for selected pipelines ────────────────────────────────────────
+
+export async function fetchBitrixStages(connection: CrmConnection): Promise<{ pipelines: BitrixPipeline[] }> {
+  const isWebhook = !connection.access_token;
+  let accessToken = connection.access_token;
+  if (!isWebhook && connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
+    accessToken = await refreshBitrixToken(connection);
+  }
+  const rawBaseUrl = isWebhook ? connection.domain : `${connection.domain}/rest`;
+  let baseUrl: string;
+  try { baseUrl = normalizeWebhookUrl(rawBaseUrl); } catch {
+    baseUrl = isWebhook ? `https://${connection.domain.replace(/\/$/, '')}` : `https://${connection.domain}/rest`;
+  }
+  const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
+
+  const cfg = connection.sync_config as BitrixSyncConfig | null;
+  const categoryIds: number[] = cfg?.deal_category_ids ?? [];
+  const includeLeads: boolean = cfg?.include_leads ?? false;
+
+  const pipelines: BitrixPipeline[] = [];
+
+  for (const catId of categoryIds) {
+    let stages: BitrixPipelineStage[] = [];
+    let pipelineName = `Воронка ${catId}`;
+
+    if (catId === 0) {
+      const [stagesRes, defCatRes] = await Promise.all([
+        axios.get(`${baseUrl}/crm.status.list`, {
+          params: { ...authParams, filter: { ENTITY_ID: 'DEAL_STAGE' } }, timeout: 15000,
+        }),
+        axios.get(`${baseUrl}/crm.dealcategory.default.get`, { params: authParams, timeout: 15000 }),
+      ]);
+      pipelineName = decodeHtml(defCatRes.data?.result?.NAME) || 'Основная воронка';
+      stages = (stagesRes.data?.result || []).map((s: any) => ({
+        id: s.STATUS_ID as string,
+        name: (decodeHtml(s.NAME) || s.STATUS_ID) as string,
+        semantics: (s.SEMANTICS || '') as string,
+      }));
+    } else {
+      const [stagesRes, catRes] = await Promise.all([
+        axios.get(`${baseUrl}/crm.dealcategory.stages`, {
+          params: { ...authParams, id: catId }, timeout: 15000,
+        }),
+        axios.get(`${baseUrl}/crm.dealcategory.get`, {
+          params: { ...authParams, id: catId }, timeout: 15000,
+        }),
+      ]);
+      pipelineName = decodeHtml(catRes.data?.result?.NAME) || `Воронка ${catId}`;
+      stages = (stagesRes.data?.result || []).map((s: any) => ({
+        id: s.STATUS_ID as string,
+        name: (decodeHtml(s.NAME) || s.STATUS_ID) as string,
+        semantics: (s.SEMANTICS || '') as string,
+      }));
+    }
+
+    pipelines.push({ id: `deal_${catId}`, name: pipelineName, type: 'deal', stages });
+  }
+
+  if (includeLeads) {
+    const res = await axios.get(`${baseUrl}/crm.status.list`, {
+      params: { ...authParams, filter: { ENTITY_ID: 'STATUS' } }, timeout: 15000,
+    });
+    const stages: BitrixPipelineStage[] = (res.data?.result || []).map((s: any) => ({
+      id: s.STATUS_ID as string,
+      name: (decodeHtml(s.NAME) || s.STATUS_ID) as string,
+      semantics: (s.SEMANTICS || '') as string,
+    }));
+    pipelines.push({ id: 'leads', name: 'Лиды', type: 'lead', stages });
+  }
+
+  return { pipelines };
+}
+
+// ── Fetch enum options for a custom field ──────────────────────────────────────
+
+export async function fetchBitrixFieldOptions(
+  connection: CrmConnection,
+  fieldCode: string,
+): Promise<{ options: Array<{ id: string; value: string }> }> {
+  const isWebhook = !connection.access_token;
+  let accessToken = connection.access_token;
+  if (!isWebhook && connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
+    accessToken = await refreshBitrixToken(connection);
+  }
+  const rawBaseUrl = isWebhook ? connection.domain : `${connection.domain}/rest`;
+  let baseUrl: string;
+  try { baseUrl = normalizeWebhookUrl(rawBaseUrl); } catch {
+    baseUrl = isWebhook ? `https://${connection.domain.replace(/\/$/, '')}` : `https://${connection.domain}/rest`;
+  }
+  const authParams: Record<string, string> = isWebhook ? {} : { auth: accessToken as string };
+
+  // User field (UF_*): fetch via crm.deal.userfield.list or crm.lead.userfield.list
+  const entityMethod = fieldCode.toUpperCase().startsWith('UF_') ? 'crm.deal.userfield.list' : null;
+
+  if (entityMethod) {
+    try {
+      const res = await axios.get(`${baseUrl}/${entityMethod}`, {
+        params: { ...authParams, filter: { FIELD_NAME: fieldCode } }, timeout: 15000,
+      });
+      const field = (res.data?.result || [])[0];
+      if (field?.LIST) {
+        return {
+          options: (field.LIST as any[]).map(item => ({
+            id: String(item.ID),
+            value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
+          })),
+        };
+      }
+    } catch (e) {
+      console.warn(`[Bitrix] crm.deal.userfield.list failed for ${fieldCode}, trying crm.lead.userfield.list`);
+    }
+
+    // Fallback: lead userfield
+    try {
+      const res = await axios.get(`${baseUrl}/crm.lead.userfield.list`, {
+        params: { ...authParams, filter: { FIELD_NAME: fieldCode } }, timeout: 15000,
+      });
+      const field = (res.data?.result || [])[0];
+      if (field?.LIST) {
+        return {
+          options: (field.LIST as any[]).map(item => ({
+            id: String(item.ID),
+            value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
+          })),
+        };
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Standard field: try crm.deal.fields
+  try {
+    const res = await axios.get(`${baseUrl}/crm.deal.fields`, { params: authParams, timeout: 15000 });
+    const field = res.data?.result?.[fieldCode];
+    if (field?.items) {
+      return {
+        options: (field.items as any[]).map(item => ({
+          id: String(item.ID),
+          value: (decodeHtml(item.VALUE) || String(item.ID)) as string,
+        })),
+      };
+    }
+  } catch { /* ignore */ }
+
+  return { options: [] };
+}
+
 // ── Main sync function ─────────────────────────────────────────────────────────
 
 export async function syncBitrix24(
@@ -302,6 +461,23 @@ export async function syncBitrix24(
   const syncLeads  = cfg ? cfg.include_leads : (syncType === 'leads' || syncType === 'both');
   const syncDeals  = cfg ? cfg.deal_category_ids.length > 0 : (syncType === 'deals' || syncType === 'both');
   const dealCatIds: number[] | null = cfg ? (cfg.deal_category_ids.length > 0 ? cfg.deal_category_ids : null) : null;
+
+  // Load client's MQL field code (for qualified lead attribution)
+  const { data: clientSettings } = await supabase
+    .from('clients').select('settings').eq('id', connection.client_id).single();
+  const mqlFieldCode: string | null = (clientSettings?.settings as any)?.mqlFieldCode || null;
+
+  // If mqlFieldCode is set, pre-fetch the field options to build id→value map
+  // Bitrix24 stores enumeration value as ITEM ID in deal fields, not the text label
+  let mqlValueMap: Map<string, string> = new Map(); // id → text
+  if (mqlFieldCode && syncDeals) {
+    try {
+      const { options } = await fetchBitrixFieldOptions(connection, mqlFieldCode);
+      for (const opt of options) mqlValueMap.set(opt.id, opt.value);
+    } catch (e) {
+      console.warn('[Bitrix24] Failed to fetch MQL field options:', e);
+    }
+  }
 
   // Webhook mode: access_token is empty, domain is the full webhook path
   // e.g. "b24-xxx.bitrix24.ru/rest/1/xxxxxx/"
@@ -400,16 +576,19 @@ export async function syncBitrix24(
       dealFilterParams['CATEGORY_ID'] = dealCatIds;
     }
 
+    const dealSelectFields = [
+      'ID', 'TITLE', 'STAGE_ID', 'CATEGORY_ID', 'SOURCE_ID',
+      'ASSIGNED_BY_NAME', 'DATE_CREATE', 'CLOSEDATE',
+      'OPPORTUNITY', 'CURRENCY_ID', 'CONTACT_ID',
+      'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
+    ];
+    if (mqlFieldCode) dealSelectFields.push(mqlFieldCode);
+
     const rawDeals = await fetchAllPages<BitrixDeal>(
       baseUrl,
       'crm.deal.list',
       authParams,
-      [
-        'ID', 'TITLE', 'STAGE_ID', 'CATEGORY_ID', 'SOURCE_ID',
-        'ASSIGNED_BY_NAME', 'DATE_CREATE', 'CLOSEDATE',
-        'OPPORTUNITY', 'CURRENCY_ID', 'CONTACT_ID',
-        'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
-      ],
+      dealSelectFields,
       dealFilterParams,
       (msg) => progress(msg, 65),
     );
@@ -449,6 +628,13 @@ export async function syncBitrix24(
         utm_campaign: decodeHtml(item.UTM_CAMPAIGN),
         utm_content: decodeHtml(item.UTM_CONTENT),
         utm_term: decodeHtml(item.UTM_TERM),
+        mql_reason: mqlFieldCode ? (() => {
+          const rawVal = (item as any)[mqlFieldCode];
+          if (!rawVal) return undefined;
+          const valStr = String(rawVal);
+          // Map Bitrix enumeration item ID → human-readable text
+          return mqlValueMap.get(valStr) ?? valStr;
+        })() : undefined,
         created_at: '',
       });
     }

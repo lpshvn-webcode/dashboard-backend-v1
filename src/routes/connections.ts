@@ -3,7 +3,7 @@ import { requireAuth, requireAuthFromQuery } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { syncAllAdsAccounts, syncSingleCrmConnection } from '../services/sync-orchestrator';
 import { syncFacebookAccount } from '../services/facebook';
-import { syncBitrix24, fetchBitrixEntities } from '../services/bitrix24';
+import { syncBitrix24, fetchBitrixEntities, fetchBitrixStages, fetchBitrixFieldOptions } from '../services/bitrix24';
 import { syncAmoCRM } from '../services/amocrm';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
@@ -434,6 +434,47 @@ router.get('/crm/:id/bitrix-entities', requireAuth, async (req, res) => {
   } catch (err: any) {
     console.error('[Bitrix entities] Error:', err.message);
     res.status(500).json({ error: err.message || 'Ошибка при получении сущностей' });
+  }
+});
+
+// GET /api/connections/crm/:id/stages  — fetch pipeline stages from CRM
+router.get('/crm/:id/stages', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const { data: conn } = await supabase
+    .from('crm_connections').select('*').eq('id', req.params.id).single();
+  if (!conn) return res.status(404).json({ error: 'Not found' });
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  try {
+    const result = await fetchBitrixStages(conn as any);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Bitrix stages] Error:', err.message);
+    res.status(500).json({ error: err.message || 'Ошибка при получении стадий' });
+  }
+});
+
+// GET /api/connections/crm/:id/field-options?fieldCode=XXX  — fetch enum options for a field
+router.get('/crm/:id/field-options', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const { fieldCode } = req.query as Record<string, string>;
+  if (!fieldCode) return res.status(400).json({ error: 'fieldCode is required' });
+
+  const { data: conn } = await supabase
+    .from('crm_connections').select('*').eq('id', req.params.id).single();
+  if (!conn) return res.status(404).json({ error: 'Not found' });
+  const { data: client } = await supabase
+    .from('clients').select('id').eq('id', conn.client_id).eq('user_id', userId).single();
+  if (!client) return res.status(403).json({ error: 'Access denied' });
+
+  try {
+    const result = await fetchBitrixFieldOptions(conn as any, fieldCode);
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Bitrix field options] Error:', err.message);
+    res.status(500).json({ error: err.message || 'Ошибка при получении вариантов поля' });
   }
 });
 
