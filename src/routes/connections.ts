@@ -51,7 +51,7 @@ router.get('/facebook/oauth/start', requireAuthFromQuery, async (req, res) => {
   const params = new URLSearchParams({
     client_id: process.env.FACEBOOK_APP_ID!,
     redirect_uri: `${backendUrl}/api/connections/facebook/oauth/callback`,
-    scope: 'ads_management,ads_read',
+    scope: 'ads_management,ads_read,business_management,pages_read_engagement,pages_show_list',
     response_type: 'code',
     state,
   });
