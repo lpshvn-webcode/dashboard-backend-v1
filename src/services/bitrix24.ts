@@ -443,7 +443,7 @@ export async function fetchBitrixFieldOptions(
   }
 
   // Fetch all userfield IDs for an entity, then batch-get full details to read labels
-  async function searchEntityFields(listMethod: string, getMethod: string): Promise<Array<{ id: string; value: string }> | null> {
+  async function searchEntityFields(listMethod: string, getMethod: string): Promise<{ fieldCode: string; options: Array<{ id: string; value: string }> } | null> {
     // Step 1: list all user fields (get IDs)
     const listRes = await axios.get(`${baseUrl}/${listMethod}`, {
       params: { ...authParams, start: 0 }, timeout: 15000,
@@ -473,14 +473,14 @@ export async function fetchBitrixFieldOptions(
             const items: any[] = field.LIST || [];
             if (items.length > 0) {
               console.log(`[Bitrix] Found field "${label}" (${field.FIELD_NAME}) with ${items.length} options`);
-              return items.map((item: any) => ({
+              return { fieldCode: String(field.FIELD_NAME), options: items.map((item: any) => ({
                 id: String(item.ID),
                 value: (decodeHtml(String(item.VALUE)) || String(item.ID)) as string,
-              }));
+              })) };
             }
             // Field found but no LIST — maybe it's not enumeration or has no values
             console.warn(`[Bitrix] Field "${label}" found but has no enum values (type: ${field.USER_TYPE_ID})`);
-            return [];
+            return { fieldCode: String(field.FIELD_NAME), options: [] };
           }
         }
       } catch (e) {
@@ -492,22 +492,22 @@ export async function fetchBitrixFieldOptions(
 
   // 1. Search deal user fields
   try {
-    const options = await searchEntityFields('crm.deal.userfield.list', 'crm.deal.userfield.get');
-    if (options !== null) return { options };
+    const result = await searchEntityFields('crm.deal.userfield.list', 'crm.deal.userfield.get');
+    if (result !== null) return result;
   } catch (e) {
     console.warn('[Bitrix] Deal userfield search failed:', (e as any)?.message);
   }
 
   // 2. Search lead user fields
   try {
-    const options = await searchEntityFields('crm.lead.userfield.list', 'crm.lead.userfield.get');
-    if (options !== null) return { options };
+    const result = await searchEntityFields('crm.lead.userfield.list', 'crm.lead.userfield.get');
+    if (result !== null) return result;
   } catch (e) {
     console.warn('[Bitrix] Lead userfield search failed:', (e as any)?.message);
   }
 
   console.warn(`[Bitrix] No field with label containing "${fieldName}" found`);
-  return { options: [] };
+  return { fieldCode: null, options: [] };
 }
 
 // ── Main sync function ─────────────────────────────────────────────────────────
