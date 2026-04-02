@@ -510,6 +510,38 @@ export async function fetchBitrixFieldOptions(
   return { fieldCode: null, options: [] };
 }
 
+/** Fetch enum options for a known field code (UF_CRM_...) directly via userfield.list */
+export async function fetchBitrixFieldOptionsByCode(
+  connection: CrmConnection,
+  fieldCode: string,
+): Promise<Array<{ id: string; value: string }>> {
+  const isWebhook = !connection.access_token;
+  const baseUrl = isWebhook
+    ? `https://${connection.domain}`
+    : `${connection.domain}/rest`;
+  const authParams = isWebhook ? {} : { auth: connection.access_token };
+
+  try {
+    const res = await axios.get(`${baseUrl}/crm.deal.userfield.list`, {
+      params: { ...authParams, filter: { FIELD_NAME: fieldCode }, start: 0 },
+      timeout: 15000,
+    });
+    const fields: any[] = res.data?.result || [];
+    const field = fields.find((f: any) => f.FIELD_NAME === fieldCode);
+    if (!field) return [];
+    // Get full details (including LIST) via userfield.get
+    const getRes = await axios.get(`${baseUrl}/crm.deal.userfield.get`, {
+      params: { ...authParams, id: field.ID },
+      timeout: 10000,
+    });
+    const fullField = getRes.data?.result;
+    if (!fullField?.LIST) return [];
+    return fullField.LIST.map((item: any) => ({ id: String(item.ID), value: String(item.VALUE) }));
+  } catch {
+    return [];
+  }
+}
+
 // ── Main sync function ─────────────────────────────────────────────────────────
 
 export async function syncBitrix24(
@@ -537,8 +569,9 @@ export async function syncBitrix24(
   let mqlValueMap: Map<string, string> = new Map(); // id → text
   if (mqlFieldCode && syncDeals) {
     try {
-      const { options } = await fetchBitrixFieldOptions(connection, mqlFieldCode);
+      const options = await fetchBitrixFieldOptionsByCode(connection, mqlFieldCode);
       for (const opt of options) mqlValueMap.set(opt.id, opt.value);
+      console.log(`[Bitrix24] MQL field ${mqlFieldCode}: loaded ${options.length} enum values`);
     } catch (e) {
       console.warn('[Bitrix24] Failed to fetch MQL field options:', e);
     }
