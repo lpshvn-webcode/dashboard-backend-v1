@@ -567,6 +567,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
           existing.leads_platform += Number(row.leads_platform) || 0;
           existing.leads_crm += Number(row.leads_crm) || 0;
           existing.qualified_leads += Number(row.qualified_leads) || 0;
+          existing.mql_leads = (existing.mql_leads || 0) + (Number(row.mql_leads) || 0);
           existing.sales_count += Number(row.sales_count) || 0;
           existing.revenue += Number(row.revenue) || 0;
         } else {
@@ -587,6 +588,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
             leads_platform: Number(row.leads_platform) || 0,
             leads_crm: Number(row.leads_crm) || 0,
             qualified_leads: Number(row.qualified_leads) || 0,
+            mql_leads: Number(row.mql_leads) || 0,
             sales_count: Number(row.sales_count) || 0,
             revenue: Number(row.revenue) || 0,
           });
@@ -615,6 +617,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
           existing.leads_platform += Number(row.leads_platform) || 0;
           existing.leads_crm += Number(row.leads_crm) || 0;
           existing.qualified_leads += Number(row.qualified_leads) || 0;
+          existing.mql_leads = (existing.mql_leads || 0) + (Number(row.mql_leads) || 0);
           existing.sales_count += Number(row.sales_count) || 0;
           existing.revenue += Number(row.revenue) || 0;
         } else {
@@ -630,6 +633,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
             leads_platform: Number(row.leads_platform) || 0,
             leads_crm: Number(row.leads_crm) || 0,
             qualified_leads: Number(row.qualified_leads) || 0,
+            mql_leads: Number(row.mql_leads) || 0,
             sales_count: Number(row.sales_count) || 0,
             revenue: Number(row.revenue) || 0,
           });
@@ -878,18 +882,19 @@ router.get('/debug-data', requireAuth, async (req, res) => {
     // ── cross_analytics summary ────────────────────────────────────────────
     const { data: crossRows } = await supabase
       .from('cross_analytics')
-      .select('spend, leads_crm, leads_platform, qualified_leads, sales_count, revenue')
+      .select('spend, leads_crm, leads_platform, qualified_leads, mql_leads, sales_count, revenue')
       .eq('client_id', clientId)
       .gte('date', from)
       .lte('date', to);
 
-    const crossTotals = { rows: 0, spend: 0, leads_crm: 0, leads_platform: 0, qualified_leads: 0, sales_count: 0, revenue: 0 };
+    const crossTotals = { rows: 0, spend: 0, leads_crm: 0, leads_platform: 0, qualified_leads: 0, mql_leads: 0, sales_count: 0, revenue: 0 };
     for (const r of crossRows || []) {
       crossTotals.rows++;
       crossTotals.spend += Number(r.spend) || 0;
       crossTotals.leads_crm += Number(r.leads_crm) || 0;
       crossTotals.leads_platform += Number(r.leads_platform) || 0;
       crossTotals.qualified_leads += Number(r.qualified_leads) || 0;
+      crossTotals.mql_leads += Number(r.mql_leads) || 0;
       crossTotals.sales_count += Number(r.sales_count) || 0;
       crossTotals.revenue += Number(r.revenue) || 0;
     }
@@ -933,10 +938,11 @@ function buildTotals(data: any[]) {
       leads_platform: acc.leads_platform + (r.leads_platform || 0),
       leads_crm: acc.leads_crm + (r.leads_crm || 0),
       qualified_leads: acc.qualified_leads + (r.qualified_leads || 0),
+      mql_leads: acc.mql_leads + (r.mql_leads || 0),
       sales_count: acc.sales_count + (r.sales_count || 0),
       revenue: acc.revenue + (r.revenue || 0),
     }),
-    { spend: 0, impressions: 0, clicks: 0, reach: 0, leads_platform: 0, leads_crm: 0, qualified_leads: 0, sales_count: 0, revenue: 0 },
+    { spend: 0, impressions: 0, clicks: 0, reach: 0, leads_platform: 0, leads_crm: 0, qualified_leads: 0, mql_leads: 0, sales_count: 0, revenue: 0 },
   );
 }
 
