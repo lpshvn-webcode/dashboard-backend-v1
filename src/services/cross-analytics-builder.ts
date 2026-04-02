@@ -160,6 +160,7 @@ export async function buildCrossAnalytics(
     currency: string;
     leads_crm: number;
     qualified_leads: number;
+    mql_leads: number;
     sales_count: number;
     revenue: number;
   }
@@ -224,6 +225,7 @@ export async function buildCrossAnalytics(
       currency: c.currency || 'USD',
       leads_crm: 0,
       qualified_leads: 0,
+      mql_leads: 0,
       sales_count: 0,
       revenue: 0,
     };
@@ -394,10 +396,13 @@ export async function buildCrossAnalytics(
       target.leads_crm += 1;
       target.revenue += Number(lead.price) || 0;
 
-      // Qualified: stage is marked qualified, OR MQL reason matches
+      // Qualified: stage is marked as qualified (separate from MQL)
       const isQualifiedByStage = lead.status && qualifiedStageIds.has(lead.status);
+      if (isQualifiedByStage) target.qualified_leads += 1;
+
+      // MQL: lead closed with a valid rejection reason (tracked separately)
       const isQualifiedByMql = mqlReasons.length > 0 && lead.mql_reason && mqlReasons.includes(lead.mql_reason);
-      if (isQualifiedByStage || isQualifiedByMql) target.qualified_leads += 1;
+      if (isQualifiedByMql) target.mql_leads += 1;
 
       // Sale: stage is marked as sale
       if (lead.status && saleStageIds.has(lead.status)) target.sales_count += 1;
@@ -447,6 +452,7 @@ export async function buildCrossAnalytics(
           currency: r.currency,
           leads_crm: r.leads_crm,
           qualified_leads: r.qualified_leads,
+          mql_leads: r.mql_leads,
           sales_count: r.sales_count,
           revenue: r.revenue,
           updated_at: new Date().toISOString(),
