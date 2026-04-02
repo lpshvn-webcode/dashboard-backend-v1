@@ -451,6 +451,9 @@ export async function fetchBitrixFieldOptions(
       params: authParams, timeout: 15000,
     });
     const fieldsMap: Record<string, any> = res.data?.result || {};
+    // Debug: log first 10 UF_ field titles to see actual structure
+    const ufEntries = Object.entries(fieldsMap).filter(([k]) => k.startsWith('UF_')).slice(0, 10);
+    console.log('[Bitrix] Sample UF_ deal fields:', JSON.stringify(ufEntries.map(([k, v]) => ({ code: k, title: v?.title, type: v?.type }))));
     const options = searchInFieldsMap(fieldsMap);
     if (options) return { options };
   } catch (e) {
