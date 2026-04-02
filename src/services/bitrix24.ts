@@ -418,7 +418,7 @@ export async function fetchBitrixStages(connection: CrmConnection): Promise<{ pi
 export async function fetchBitrixFieldOptions(
   connection: CrmConnection,
   fieldName: string,
-): Promise<{ options: Array<{ id: string; value: string }> }> {
+): Promise<{ fieldCode: string | null; options: Array<{ id: string; value: string }> }> {
   const isWebhook = !connection.access_token;
   let accessToken = connection.access_token;
   if (!isWebhook && connection.token_expires_at && new Date(connection.token_expires_at) < new Date(Date.now() + 5 * 60 * 1000)) {
