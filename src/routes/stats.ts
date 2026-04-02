@@ -561,6 +561,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
         const existing = adMap.get(key);
         if (existing) {
           existing.spend += Number(row.spend) || 0;
+          existing.spend_local = (existing.spend_local || 0) + (Number(row.spend_local) || 0);
           existing.impressions += Number(row.impressions) || 0;
           existing.clicks += Number(row.clicks) || 0;
           existing.reach += Number(row.reach) || 0;
@@ -591,6 +592,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
             mql_leads: Number(row.mql_leads) || 0,
             sales_count: Number(row.sales_count) || 0,
             revenue: Number(row.revenue) || 0,
+            spend_local: Number(row.spend_local) || 0,
           });
         }
       }
@@ -611,6 +613,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
         const existing = adsetMap.get(key);
         if (existing) {
           existing.spend += Number(row.spend) || 0;
+          existing.spend_local = (existing.spend_local || 0) + (Number(row.spend_local) || 0);
           existing.impressions += Number(row.impressions) || 0;
           existing.clicks += Number(row.clicks) || 0;
           existing.reach += Number(row.reach) || 0;
@@ -636,6 +639,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
             mql_leads: Number(row.mql_leads) || 0,
             sales_count: Number(row.sales_count) || 0,
             revenue: Number(row.revenue) || 0,
+            spend_local: Number(row.spend_local) || 0,
           });
         }
       }
@@ -941,8 +945,9 @@ function buildTotals(data: any[]) {
       mql_leads: acc.mql_leads + (r.mql_leads || 0),
       sales_count: acc.sales_count + (r.sales_count || 0),
       revenue: acc.revenue + (r.revenue || 0),
+      spend_local: acc.spend_local + (r.spend_local || 0),
     }),
-    { spend: 0, impressions: 0, clicks: 0, reach: 0, leads_platform: 0, leads_crm: 0, qualified_leads: 0, mql_leads: 0, sales_count: 0, revenue: 0 },
+    { spend: 0, impressions: 0, clicks: 0, reach: 0, leads_platform: 0, leads_crm: 0, qualified_leads: 0, mql_leads: 0, sales_count: 0, revenue: 0, spend_local: 0 },
   );
 }
 

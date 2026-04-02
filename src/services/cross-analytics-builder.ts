@@ -1,5 +1,6 @@
 import he from 'he';
 import { supabase } from '../lib/supabase';
+import { loadExchangeRates } from './exchange-rate-service';
 
 /**
  * Builds / refreshes the `cross_analytics` table for a given client.
@@ -133,6 +134,12 @@ export async function buildCrossAnalytics(
 
   console.log(`[CrossBuilder] Maps: ${campaignMap.size} campaigns, ${adsetMap.size} adsets`);
 
+  // ── Load client currency & exchange rates for spend_local ──────────────────
+  const { data: clientSettingsForRate } = await supabase
+    .from('clients').select('settings').eq('id', clientId).single();
+  const clientCurrency: string = (clientSettingsForRate?.settings as any)?.currency || 'KZT';
+  const rateMap = await loadExchangeRates(dateFrom, dateTo, clientCurrency);
+
   // ── 4. Build cross_analytics rows from creatives ───────────────────────────
   interface CrossRow {
     client_id: string;
@@ -163,6 +170,7 @@ export async function buildCrossAnalytics(
     mql_leads: number;
     sales_count: number;
     revenue: number;
+    spend_local: number;
   }
 
   // Key for lookup: campaign_name|adset_name|ad_name|date
@@ -228,6 +236,7 @@ export async function buildCrossAnalytics(
       mql_leads: 0,
       sales_count: 0,
       revenue: 0,
+      spend_local: (Number(c.spend) || 0) * (rateMap.get(c.date) ?? 490),
     };
 
     const key = makeKey(campaignInfo.name, adsetInfo.name, c.ad_name, c.date);
@@ -235,6 +244,7 @@ export async function buildCrossAnalytics(
     const existing = rowMap.get(key);
     if (existing) {
       existing.spend += row.spend;
+      existing.spend_local += row.spend_local;
       existing.impressions += row.impressions;
       existing.clicks += row.clicks;
       existing.leads_platform += row.leads_platform;
@@ -305,6 +315,7 @@ export async function buildCrossAnalytics(
   const { data: clientData } = await supabase
     .from('clients').select('settings').eq('id', clientId).single();
   const settings = (clientData?.settings as any) || {};
+
   const allStages: Array<{ id: string; isQualified?: boolean; isSale?: boolean }> =
     settings.dealStages || settings.leadStages || [];
   const qualifiedStageIds = new Set(allStages.filter(s => s.isQualified).map(s => s.id));
@@ -455,6 +466,7 @@ export async function buildCrossAnalytics(
           mql_leads: r.mql_leads,
           sales_count: r.sales_count,
           revenue: r.revenue,
+          spend_local: r.spend_local,
           updated_at: new Date().toISOString(),
         })),
         { onConflict: 'client_id,date,ad_id,ad_account_id' },
