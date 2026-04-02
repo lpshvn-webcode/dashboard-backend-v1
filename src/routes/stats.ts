@@ -3,7 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
-import { syncExchangeRates } from '../services/exchange-rate-service';
+import { syncExchangeRates, getExchangeRateHistory } from '../services/exchange-rate-service';
 
 const router = Router();
 
@@ -460,8 +460,20 @@ router.post('/build-cross-analytics', requireAuth, async (req, res) => {
   }
 });
 
+// GET /api/stats/exchange-rates?currency=KZT&days=90
+// Returns stored exchange rate history for the last N days
+router.get('/exchange-rates', requireAuth, async (req, res) => {
+  const { currency = 'KZT', days = '90' } = req.query as Record<string, string>;
+  try {
+    const history = await getExchangeRateHistory(currency.toUpperCase(), Number(days));
+    res.json({ currency: currency.toUpperCase(), history });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/stats/sync-exchange-rates?currency=KZT&days=90
-// Sync exchange rates from NBK for the last N days (default 90)
+// Sync exchange rates for the last N days using fawazahmed0 CDN (historical)
 router.post('/sync-exchange-rates', requireAuth, async (req, res) => {
   const { currency = 'KZT', days = '90' } = req.query as Record<string, string>;
   const now = new Date();

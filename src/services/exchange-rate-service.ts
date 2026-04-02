@@ -2,36 +2,55 @@ import axios from 'axios';
 import { supabase } from '../lib/supabase';
 
 /**
- * Fetches current exchange rate for a given currency pair from exchangerate-api.com (free, no key).
- * Returns the rate as a number, or null on failure.
+ * Fetches exchange rate for a specific date using fawazahmed0/currency-api (CDN-hosted, free, historical).
+ * Falls back to current rate if historical date fails.
  */
-async function fetchCurrentRate(toCurrency: string, fromCurrency = 'USD'): Promise<number | null> {
-  // Primary: exchangerate-api.com (free tier, updated daily)
-  try {
-    const res = await axios.get(`https://api.exchangerate-api.com/v4/latest/${fromCurrency.toUpperCase()}`, {
-      timeout: 10000,
-    });
-    const rate = res.data?.rates?.[toCurrency.toUpperCase()];
-    if (rate) {
-      console.log(`[ExchangeRate] Got ${fromCurrency}/${toCurrency} = ${rate} from exchangerate-api.com`);
-      return Number(rate);
+async function fetchRateForDate(
+  date: string, // YYYY-MM-DD
+  toCurrency: string,
+  fromCurrency = 'USD',
+): Promise<number | null> {
+  const from = fromCurrency.toLowerCase();
+  const to = toCurrency.toLowerCase();
+
+  // Primary: fawazahmed0 CDN with specific date (supports history!)
+  const urls = [
+    `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${date}/v1/currencies/${from}.json`,
+    `https://${date}.currency-api.pages.dev/v1/currencies/${from}.json`,
+  ];
+
+  for (const url of urls) {
+    try {
+      const res = await axios.get(url, { timeout: 10000 });
+      const rate = res.data?.[from]?.[to];
+      if (rate) {
+        return Number(rate);
+      }
+    } catch {
+      // try next
     }
-  } catch (err) {
-    console.warn('[ExchangeRate] exchangerate-api.com failed:', (err as any)?.message);
   }
 
-  // Fallback: open.er-api.com
-  try {
-    const res = await axios.get(`https://open.er-api.com/v6/latest/${fromCurrency.toUpperCase()}`, {
-      timeout: 10000,
-    });
-    const rate = res.data?.rates?.[toCurrency.toUpperCase()];
-    if (rate) {
-      console.log(`[ExchangeRate] Got ${fromCurrency}/${toCurrency} = ${rate} from open.er-api.com`);
-      return Number(rate);
+  // Fallback: get latest rate (no history but at least something)
+  const latestUrls = [
+    `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/${from}.json`,
+    `https://latest.currency-api.pages.dev/v1/currencies/${from}.json`,
+    `https://api.exchangerate-api.com/v4/latest/${fromCurrency.toUpperCase()}`,
+  ];
+
+  for (const url of latestUrls) {
+    try {
+      const res = await axios.get(url, { timeout: 10000 });
+      // fawazahmed0 format: { usd: { kzt: 490 } }
+      // exchangerate-api format: { rates: { KZT: 490 } }
+      const rate = res.data?.[from]?.[to] ?? res.data?.rates?.[toCurrency.toUpperCase()];
+      if (rate) {
+        console.log(`[ExchangeRate] Fallback rate for ${date}: ${fromCurrency}/${toCurrency} = ${rate}`);
+        return Number(rate);
+      }
+    } catch {
+      // try next
     }
-  } catch (err) {
-    console.warn('[ExchangeRate] open.er-api.com failed:', (err as any)?.message);
   }
 
   return null;
@@ -39,9 +58,8 @@ async function fetchCurrentRate(toCurrency: string, fromCurrency = 'USD'): Promi
 
 /**
  * Syncs exchange rates for a currency pair over a date range.
+ * Uses fawazahmed0 CDN API which supports per-date historical rates.
  * Skips dates that already have a rate stored.
- * Uses NBK API for KZT; for other currencies a warning is logged.
- *
  * @returns number of new rates stored
  */
 export async function syncExchangeRates(
@@ -51,10 +69,10 @@ export async function syncExchangeRates(
   fromCurrency = 'USD',
 ): Promise<number> {
   if (toCurrency.toUpperCase() === 'USD' && fromCurrency.toUpperCase() === 'USD') {
-    return 0; // trivial
+    return 0;
   }
 
-  // Load existing rates for the range to skip already-stored dates
+  // Load existing rates to skip already-stored dates
   const { data: existing } = await supabase
     .from('exchange_rates')
     .select('date')
@@ -65,7 +83,7 @@ export async function syncExchangeRates(
 
   const existingDates = new Set((existing || []).map((r: any) => r.date));
 
-  // Build list of dates to fetch
+  // Build list of dates to fetch (skip weekends only if we have carry-forward data)
   const datesToFetch: string[] = [];
   const current = new Date(dateFrom);
   const end = new Date(dateTo);
@@ -76,25 +94,44 @@ export async function syncExchangeRates(
   }
 
   if (datesToFetch.length === 0) {
-    console.log(`[ExchangeRate] All ${dateFrom}..${dateTo} rates already stored`);
+    console.log(`[ExchangeRate] All ${dateFrom}..${dateTo} rates already stored for ${fromCurrency}/${toCurrency}`);
     return 0;
   }
 
-  console.log(`[ExchangeRate] Fetching current rate for ${datesToFetch.length} dates (${fromCurrency}/${toCurrency})`);
+  console.log(`[ExchangeRate] Fetching ${datesToFetch.length} dates for ${fromCurrency}/${toCurrency}`);
 
-  // Fetch current rate once and apply to all missing dates (free APIs don't provide history)
-  const currentRate = await fetchCurrentRate(toCurrency, fromCurrency);
   const rows: Array<{ date: string; from_currency: string; to_currency: string; rate: number; source: string }> = [];
+  let lastRate: number | null = null;
 
-  if (currentRate !== null) {
-    for (const date of datesToFetch) {
-      rows.push({
-        date,
-        from_currency: fromCurrency.toUpperCase(),
-        to_currency: toCurrency.toUpperCase(),
-        rate: currentRate,
-        source: 'exchangerate-api',
-      });
+  // Process in batches to avoid overloading CDN
+  const BATCH = 10;
+  for (let i = 0; i < datesToFetch.length; i += BATCH) {
+    const batch = datesToFetch.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map(d => fetchRateForDate(d, toCurrency, fromCurrency)));
+
+    for (let j = 0; j < batch.length; j++) {
+      const date = batch[j];
+      const rate = results[j];
+
+      if (rate !== null) {
+        lastRate = rate;
+        rows.push({
+          date,
+          from_currency: fromCurrency.toUpperCase(),
+          to_currency: toCurrency.toUpperCase(),
+          rate,
+          source: 'fawazahmed0',
+        });
+      } else if (lastRate !== null) {
+        // Carry-forward for weekends/holidays
+        rows.push({
+          date,
+          from_currency: fromCurrency.toUpperCase(),
+          to_currency: toCurrency.toUpperCase(),
+          rate: lastRate,
+          source: 'carry-forward',
+        });
+      }
     }
   }
 
@@ -110,32 +147,58 @@ export async function syncExchangeRates(
 }
 
 /**
- * Syncs yesterday's rate for all unique currency pairs used by clients.
+ * Syncs today's rate for all unique currency pairs used by clients.
  * Called daily by cron.
  */
 export async function syncTodayRateForAllClients(): Promise<void> {
-  // Get distinct currencies from client settings
   const { data: clients } = await supabase.from('clients').select('settings');
   const currencies = new Set<string>();
   for (const client of clients || []) {
     const currency = (client.settings as any)?.currency;
     if (currency && currency !== 'USD') currencies.add(currency.toUpperCase());
   }
-  if (currencies.size === 0) currencies.add('KZT'); // default
+  if (currencies.size === 0) currencies.add('KZT');
 
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const dateStr = yesterday.toISOString().substring(0, 10);
+  const today = new Date().toISOString().substring(0, 10);
 
   for (const currency of currencies) {
-    await syncExchangeRates(currency, dateStr, dateStr);
+    await syncExchangeRates(currency, today, today);
   }
 }
 
 /**
+ * Returns exchange rate history for the last N days.
+ * Includes date, rate, and source.
+ */
+export async function getExchangeRateHistory(
+  toCurrency: string,
+  days = 90,
+  fromCurrency = 'USD',
+): Promise<Array<{ date: string; rate: number; source: string }>> {
+  const now = new Date();
+  const dateTo = now.toISOString().substring(0, 10);
+  const dateFrom = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
+    .toISOString().substring(0, 10);
+
+  const { data } = await supabase
+    .from('exchange_rates')
+    .select('date, rate, source')
+    .eq('from_currency', fromCurrency.toUpperCase())
+    .eq('to_currency', toCurrency.toUpperCase())
+    .gte('date', dateFrom)
+    .lte('date', dateTo)
+    .order('date', { ascending: false });
+
+  return (data || []).map((r: any) => ({
+    date: r.date,
+    rate: Number(r.rate),
+    source: r.source,
+  }));
+}
+
+/**
  * Loads exchange rates for a date range from the DB.
- * Returns a map: date → rate.
- * For missing dates, falls back to the nearest preceding rate.
+ * Returns a map: date → rate. Missing dates use carry-forward.
  */
 export async function loadExchangeRates(
   dateFrom: string,
@@ -158,7 +221,7 @@ export async function loadExchangeRates(
     stored.set(row.date, Number(row.rate));
   }
 
-  // Fill in the full date range with carry-forward for missing dates
+  // Fill full range with carry-forward for missing dates
   const result = new Map<string, number>();
   let last = fallbackRate;
   const cur = new Date(dateFrom);
