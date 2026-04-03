@@ -660,12 +660,14 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
       const existing = campMap.get(key);
       if (existing) {
         existing.spend += Number(row.spend) || 0;
+        existing.spend_local = (existing.spend_local || 0) + (Number(row.spend_local) || 0);
         existing.impressions += Number(row.impressions) || 0;
         existing.clicks += Number(row.clicks) || 0;
         existing.reach += Number(row.reach) || 0;
         existing.leads_platform += Number(row.leads_platform) || 0;
         existing.leads_crm += Number(row.leads_crm) || 0;
         existing.qualified_leads += Number(row.qualified_leads) || 0;
+        existing.mql_leads = (existing.mql_leads || 0) + (Number(row.mql_leads) || 0);
         existing.sales_count += Number(row.sales_count) || 0;
         existing.revenue += Number(row.revenue) || 0;
         if (row.date < existing.first_date) existing.first_date = row.date;
@@ -679,12 +681,14 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
           campaign_status: row.campaign_status,
           platform: row.platform,
           spend: Number(row.spend) || 0,
+          spend_local: Number(row.spend_local) || 0,
           impressions: Number(row.impressions) || 0,
           clicks: Number(row.clicks) || 0,
           reach: Number(row.reach) || 0,
           leads_platform: Number(row.leads_platform) || 0,
           leads_crm: Number(row.leads_crm) || 0,
           qualified_leads: Number(row.qualified_leads) || 0,
+          mql_leads: Number(row.mql_leads) || 0,
           sales_count: Number(row.sales_count) || 0,
           revenue: Number(row.revenue) || 0,
           first_date: row.date,
