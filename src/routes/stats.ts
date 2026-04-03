@@ -740,7 +740,7 @@ router.get('/cross-kpis', requireAuth, async (req, res) => {
       while (true) {
         let q = supabase
           .from('cross_analytics')
-          .select('date, spend, impressions, clicks, reach, leads_platform, leads_crm, qualified_leads, sales_count, revenue, campaign_name')
+          .select('date, spend, spend_local, impressions, clicks, reach, leads_platform, leads_crm, qualified_leads, mql_leads, sales_count, revenue, campaign_name')
           .eq('client_id', clientId)
           .gte('date', from)
           .lte('date', to)
@@ -771,20 +771,22 @@ router.get('/cross-kpis', requireAuth, async (req, res) => {
       }
 
       const totals = {
-        spend: 0, impressions: 0, clicks: 0, reach: 0,
-        leads_platform: 0, leads_crm: 0, qualified_leads: 0,
+        spend: 0, spend_local: 0, impressions: 0, clicks: 0, reach: 0,
+        leads_platform: 0, leads_crm: 0, qualified_leads: 0, mql_leads: 0,
         sales_count: 0, revenue: 0,
       };
       const dailySpend: Record<string, number> = {};
 
       for (const r of filteredRows) {
         totals.spend += Number(r.spend) || 0;
+        totals.spend_local += Number(r.spend_local) || 0;
         totals.impressions += Number(r.impressions) || 0;
         totals.clicks += Number(r.clicks) || 0;
         totals.reach += Number(r.reach) || 0;
         totals.leads_platform += Number(r.leads_platform) || 0;
         totals.leads_crm += Number(r.leads_crm) || 0;
         totals.qualified_leads += Number(r.qualified_leads) || 0;
+        totals.mql_leads += Number(r.mql_leads) || 0;
         totals.sales_count += Number(r.sales_count) || 0;
         totals.revenue += Number(r.revenue) || 0;
         dailySpend[r.date] = (dailySpend[r.date] || 0) + (Number(r.spend) || 0);
