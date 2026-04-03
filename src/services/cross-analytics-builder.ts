@@ -396,6 +396,7 @@ export async function buildCrossAnalytics(
           cpc: 0,
           leads_crm: 0,
           qualified_leads: 0,
+          mql_leads: 0,
           sales_count: 0,
           revenue: 0,
         };
@@ -407,13 +408,13 @@ export async function buildCrossAnalytics(
       target.leads_crm += 1;
       target.revenue += Number(lead.price) || 0;
 
-      // Qualified: stage is marked as qualified (separate from MQL)
+      // Qualified: lead reached a qualified stage in the funnel
       const isQualifiedByStage = lead.status && qualifiedStageIds.has(lead.status);
       if (isQualifiedByStage) target.qualified_leads += 1;
 
-      // MQL: lead closed with a valid rejection reason (tracked separately)
+      // MQL: qualified by stage OR closed with a valid MQL reason (superset of qualified_leads)
       const isQualifiedByMql = mqlReasons.length > 0 && lead.mql_reason && mqlReasons.includes(lead.mql_reason);
-      if (isQualifiedByMql) target.mql_leads += 1;
+      if (isQualifiedByStage || isQualifiedByMql) target.mql_leads += 1;
 
       // Sale: stage is marked as sale
       if (lead.status && saleStageIds.has(lead.status)) target.sales_count += 1;
