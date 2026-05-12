@@ -739,19 +739,28 @@ export async function syncBitrix24(
   }
 
   // ── Upsert records ──────────────────────────────────────────────────────────
+  // Deduplicate by upsert key (crm_connection_id, lead_id) before sending —
+  // PostgreSQL upsert rejects a batch that contains two rows with the same
+  // conflict target ("ON CONFLICT DO UPDATE command cannot affect row a second time").
   progress('Сохранение в базу данных...', 85);
   if (records.length > 0) {
+    const dedupMap = new Map<string, typeof records[number]>();
+    for (const r of records) {
+      dedupMap.set(`${connection.id}|${r.lead_id}`, r); // last write wins
+    }
+    const dedupedRecords = Array.from(dedupMap.values());
+
     const { error } = await supabase
       .from('crm_leads')
       .upsert(
-        records.map(({ id, created_at, ...rest }) => rest),
+        dedupedRecords.map(({ id, created_at, ...rest }) => rest),
         { onConflict: 'crm_connection_id,lead_id' },
       );
     if (error) {
       console.error('[Bitrix24] Upsert error:', error.message);
     } else {
-      console.log(`[Bitrix24] Upserted ${records.length} records`);
-      progress(`Сохранено ${records.length} записей`, 90);
+      console.log(`[Bitrix24] Upserted ${dedupedRecords.length} records (deduped from ${records.length})`);
+      progress(`Сохранено ${dedupedRecords.length} записей`, 90);
     }
   }
 
