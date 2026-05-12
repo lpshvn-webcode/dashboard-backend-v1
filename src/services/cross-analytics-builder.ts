@@ -258,58 +258,11 @@ export async function buildCrossAnalytics(
     `skipped ${skippedNoHierarchy} (no hierarchy), ${skippedPromo} (promo/boost)`
   );
 
-  // ── 5. Load matched CRM leads and attribute to cross rows ──────────────────
+  // ── 5. Load matched CRM records and attribute to cross rows ────────────────
   //
-  // Some CRMs (Bitrix24 sync_type='both') create BOTH a Lead (form submission
-  // with UTM) AND a Deal (sales pipeline entry) for the same contact. Both get
-  // matched by the UTM matcher → double-counting leads_crm.
-  //
-  // Resolution rule (no config needed):
-  //   • If ANY matched non-dup Lead exists → count ONLY Leads.
-  //     Rationale: Leads are the raw form submission — the correct unit for
-  //     "how many people clicked the ad and filled the form".
-  //   • If NO matched Leads exist but Deals do → count Deals.
-  //     Rationale: client uses Deals as their primary lead entity (AMO, etc.)
-  //
-  // This avoids 2× inflation without requiring per-client configuration.
-
-  // Determine which record_type(s) to count based on the client's CRM sync_config.
-  //
-  // sync_config reflects what the user explicitly chose to sync in the UI:
-  //   • include_leads=false, deal_category_ids=[...] → only deals
-  //   • include_leads=true,  deal_category_ids=[]    → only leads
-  //   • include_leads=true,  deal_category_ids=[...] → both (is_duplicate handles dedup)
-  //   • no sync_config (legacy sync_type)            → fallback to range-count heuristic
-  //
-  const { data: crmConns } = await supabase
-    .from('crm_connections')
-    .select('sync_config, sync_type')
-    .eq('client_id', clientId)
-    .eq('is_active', true);
-
-  let recordTypeFilter: 'lead' | 'deal' | null = null; // null = no filter (count both)
-
-  if (crmConns && crmConns.length > 0) {
-    // Pick the first active connection that has explicit sync_config
-    const connWithConfig = crmConns.find((c: any) => c.sync_config != null);
-    if (connWithConfig?.sync_config) {
-      const cfg = connWithConfig.sync_config as { include_leads: boolean; deal_category_ids: number[] };
-      if (!cfg.include_leads && cfg.deal_category_ids.length > 0) {
-        recordTypeFilter = 'deal';
-      } else if (cfg.include_leads && cfg.deal_category_ids.length === 0) {
-        recordTypeFilter = 'lead';
-      }
-      // else: both selected → no filter, is_duplicate handles dedup
-    } else {
-      // Legacy sync_type fallback
-      const syncType = crmConns[0].sync_type as string | null;
-      if (syncType === 'leads') recordTypeFilter = 'lead';
-      else if (syncType === 'deals') recordTypeFilter = 'deal';
-      // 'both' → no filter
-    }
-  }
-
-  console.log(`[CrossBuilder] record_type filter: ${recordTypeFilter ?? 'none (both)'}`);
+  // Unified model: everything in cross-analytics is counted as "leads".
+  // Doesn't matter whether the underlying CRM record is a Bitrix Lead or a Deal —
+  // is_duplicate already dedupes Lead+Deal pairs for the same contact.
 
   // ── Load client stage & MQL config ─────────────────────────────────────────
   const { data: clientData } = await supabase
@@ -330,11 +283,7 @@ export async function buildCrossAnalytics(
     'crm_leads',
     clientId,
     'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, mql_reason, is_duplicate',
-    (q) => {
-      let q2 = q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false);
-      if (recordTypeFilter) q2 = q2.eq('record_type', recordTypeFilter);
-      return q2;
-    },
+    (q) => q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false),
   );
 
   console.log(`[CrossBuilder] Loaded ${leads.length} matched non-duplicate CRM records`);
