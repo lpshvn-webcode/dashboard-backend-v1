@@ -7,20 +7,18 @@ import { matchUtmForClient } from './utm-matcher';
 import { buildCrossAnalytics } from './cross-analytics-builder';
 import { AdAccount, CrmConnection } from '../types/database';
 
-// Default: sync last 90 days on first sync, last 5 days on incremental.
-// Pass daysBack to override (e.g. 5 for nightly cron, 90 for manual button).
+// Default: sync last 90 days on first sync, last 30 days on incremental.
 function getDateRange(lastSynced?: string | null, daysBack?: number): { since: string; until: string } {
   const until = new Date();
   const since = new Date();
 
   if (daysBack !== undefined) {
-    // Explicit override
     since.setDate(since.getDate() - daysBack);
   } else if (lastSynced) {
-    // Incremental: go back 5 days to catch delayed/corrected data
-    since.setDate(since.getDate() - 5);
+    // Incremental: 30 days to catch renamed/paused adsets and delayed insights
+    since.setDate(since.getDate() - 30);
   } else {
-    // Initial sync (account never synced before): last 90 days
+    // Initial sync: 90 days
     since.setDate(since.getDate() - 90);
   }
 

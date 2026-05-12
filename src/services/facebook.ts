@@ -59,6 +59,23 @@ async function fetchWithToken(url: string, params: Record<string, string>) {
   return response.data;
 }
 
+/** Fetch all pages from a Graph API list endpoint via paging.next cursor. */
+async function fetchAllPages(url: string, params: Record<string, string>): Promise<any[]> {
+  const all: any[] = [];
+  let nextUrl: string | null = url;
+  let nextParams: Record<string, string> | null = params;
+
+  while (nextUrl) {
+    const resp: any = await axios.get(nextUrl, nextParams ? { params: nextParams } : undefined);
+    const data = resp.data;
+    if (Array.isArray(data?.data)) all.push(...data.data);
+    nextUrl = data?.paging?.next || null;
+    nextParams = null; // paging.next URL already contains all params
+  }
+
+  return all;
+}
+
 export async function syncFacebookAccount(
   account: AdAccount,
   dateRange: { since: string; until: string },
@@ -87,19 +104,21 @@ export async function syncFacebookAccount(
     // endpoints — it returns 400 with "deleted objects not supported".
     const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED']);
 
-    const campaignsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/campaigns`, {
+    const campaigns: FbCampaign[] = (await fetchAllPages(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
       fields: `id,name,status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       effective_status: allStatuses,
       limit: '200',
-    });
+    })) as FbCampaign[];
 
-    const campaigns: FbCampaign[] = campaignsData.data || [];
     const campaignStats: CampaignStat[] = [];
 
     for (const campaign of campaigns) {
       const insights: FbInsight[] = campaign.insights?.data || [];
-      for (const insight of insights) {
+      // If no insights in range, store a single zero-row at dateRange.until so
+      // UTM matcher can still build the (campaign, adset, ad) triple.
+      const rows = insights.length > 0 ? insights : [{ date_start: dateRange.until, spend: '0', impressions: '0', clicks: '0', reach: '0', ctr: '0', cpc: '0', actions: [] }];
+      for (const insight of rows) {
         const leads = extractLeads(insight.actions);
         const spend = parseFloat(insight.spend);
         campaignStats.push({
@@ -140,22 +159,18 @@ export async function syncFacebookAccount(
 
     // ── 2. Ad Sets ────────────────────────────────────────────────────────────
     progress('Загрузка групп объявлений...', 45);
-    const adsetsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/adsets`, {
+    const adsets: FbAdset[] = ((await fetchAllPages(`${FB_BASE_URL}/${actId}/adsets`, {
       access_token: account.access_token,
       fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       effective_status: allStatuses,
       limit: '500',
-    });
-
-    const adsets: FbAdset[] = (adsetsData.data || []).map((a: any) => ({
-      ...a,
-      campaign_name: a.campaign?.name || '',
-    }));
+    })) as any[]).map((a) => ({ ...a, campaign_name: a.campaign?.name || '' }));
 
     const adsetStats: AdsetStat[] = [];
     for (const adset of adsets) {
       const insights: FbInsight[] = adset.insights?.data || [];
-      for (const insight of insights) {
+      const rows = insights.length > 0 ? insights : [{ date_start: dateRange.until, spend: '0', impressions: '0', clicks: '0', reach: '0', ctr: '0', cpc: '0', actions: [] }];
+      for (const insight of rows) {
         const leads = extractLeads(insight.actions);
         const spend = parseFloat(insight.spend);
         adsetStats.push({
@@ -197,19 +212,19 @@ export async function syncFacebookAccount(
 
     // ── 3. Ads (Creatives) ────────────────────────────────────────────────────
     progress('Загрузка объявлений...', 72);
-    const adsData = await fetchWithToken(`${FB_BASE_URL}/${actId}/ads`, {
+    const ads: FbAd[] = (await fetchAllPages(`${FB_BASE_URL}/${actId}/ads`, {
       access_token: account.access_token,
       fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
       effective_status: allStatuses,
       limit: '500',
-    });
+    })) as FbAd[];
 
-    const ads: FbAd[] = adsData.data || [];
     const creativeStats: CreativeStat[] = [];
 
     for (const ad of ads) {
       const insights: FbInsight[] = ad.insights?.data || [];
-      for (const insight of insights) {
+      const rows = insights.length > 0 ? insights : [{ date_start: dateRange.until, spend: '0', impressions: '0', clicks: '0', reach: '0', ctr: '0', cpc: '0', actions: [] }];
+      for (const insight of rows) {
         const leads = extractLeads(insight.actions);
         const spend = parseFloat(insight.spend);
         creativeStats.push({
