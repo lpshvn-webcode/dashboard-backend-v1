@@ -40,6 +40,7 @@ interface BitrixLead {
   TITLE: string;
   STATUS_ID: string;
   SOURCE_ID?: string;
+  SOURCE_DESCRIPTION?: string;
   ASSIGNED_BY_NAME?: string;
   DATE_CREATE: string;
   DATE_CLOSED?: string;
@@ -58,6 +59,7 @@ interface BitrixDeal {
   TITLE: string;
   STAGE_ID: string;
   SOURCE_ID?: string;
+  SOURCE_DESCRIPTION?: string;
   ASSIGNED_BY_NAME?: string;
   DATE_CREATE: string;
   CLOSEDATE?: string;
@@ -628,7 +630,7 @@ export async function syncBitrix24(
       'crm.lead.list',
       authParams,
       [
-        'ID', 'TITLE', 'STATUS_ID', 'SOURCE_ID',
+        'ID', 'TITLE', 'STATUS_ID', 'SOURCE_ID', 'SOURCE_DESCRIPTION',
         'ASSIGNED_BY_NAME', 'DATE_CREATE', 'DATE_CLOSED',
         'OPPORTUNITY', 'CURRENCY_ID', 'PHONE',
         'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
@@ -655,6 +657,8 @@ export async function syncBitrix24(
         phone,
         record_type: 'lead',
         is_duplicate: false,
+        source_id: item.SOURCE_ID,
+        source_description: decodeHtml(item.SOURCE_DESCRIPTION),
         utm_source: decodeHtml(item.UTM_SOURCE),
         utm_medium: decodeHtml(item.UTM_MEDIUM),
         utm_campaign: decodeHtml(item.UTM_CAMPAIGN),
@@ -680,7 +684,7 @@ export async function syncBitrix24(
     }
 
     const dealSelectFields = [
-      'ID', 'TITLE', 'STAGE_ID', 'CATEGORY_ID', 'SOURCE_ID',
+      'ID', 'TITLE', 'STAGE_ID', 'CATEGORY_ID', 'SOURCE_ID', 'SOURCE_DESCRIPTION',
       'ASSIGNED_BY_NAME', 'DATE_CREATE', 'CLOSEDATE',
       'OPPORTUNITY', 'CURRENCY_ID', 'CONTACT_ID',
       'UTM_SOURCE', 'UTM_MEDIUM', 'UTM_CAMPAIGN', 'UTM_CONTENT', 'UTM_TERM',
@@ -726,6 +730,8 @@ export async function syncBitrix24(
         phone,
         record_type: 'deal',
         is_duplicate: false,
+        source_id: item.SOURCE_ID,
+        source_description: decodeHtml(item.SOURCE_DESCRIPTION),
         utm_source: decodeHtml(item.UTM_SOURCE),
         utm_medium: decodeHtml(item.UTM_MEDIUM),
         utm_campaign: decodeHtml(item.UTM_CAMPAIGN),

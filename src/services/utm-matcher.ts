@@ -227,15 +227,22 @@ export async function matchUtmForClient(
     matched_ad_id: string;
   }> = [];
 
+  // Substring match must avoid false positives from very short names like "1",
+  // "a", "vrach" prefix of "vrach 2", etc. Names below this length are matched
+  // only by exact equality.
+  const MIN_SUBSTRING_LEN = 4;
+  // Track how many leads matched at each level for diagnostics
+  let matchedExact = 0;
+  let matchedSubstring = 0;
+
   for (const lead of leads) {
     // Строим пул из всех 5 UTM-полей (нормализованные, без placeholder-ов)
     const utmValues = [lead.utm_source, lead.utm_medium, lead.utm_campaign, lead.utm_content, lead.utm_term];
-    const utmPool = new Set(
-      utmValues
-        .filter(v => !isPlaceholderUtm(v))
-        .map(v => normalize(v))
-        .filter(v => v !== '')
-    );
+    const utmPoolArr = utmValues
+      .filter(v => !isPlaceholderUtm(v))
+      .map(v => normalize(v))
+      .filter(v => v !== '');
+    const utmPool = new Set(utmPoolArr);
 
     if (utmPool.size === 0) {
       noUtmValues++;
@@ -243,19 +250,47 @@ export async function matchUtmForClient(
       continue;
     }
 
-    // Ищем первую тройку, все уникальные нормализованные названия которой есть в UTM-пуле
+    // ── Pass 1: exact-match — same as before, takes precedence ───────────────
     let foundTriple: FbTriple | null = null;
+    let foundVia: 'exact' | 'substring' = 'exact';
+
     for (const triple of triples) {
       let allFound = true;
       for (const name of triple.normNamesSet) {
-        if (!utmPool.has(name)) {
-          allFound = false;
+        if (!utmPool.has(name)) { allFound = false; break; }
+      }
+      if (allFound) { foundTriple = triple; break; }
+    }
+
+    // ── Pass 2: substring-match — handles partial UTM tagging ────────────────
+    // e.g. FB adset "vid // partners" → normalized "vid partners".
+    // Lead utm_content="vid // partners ne sng" → normalized "vid partners ne sng".
+    // Substring catches: "vid partners ne sng".includes("vid partners") = true.
+    if (!foundTriple) {
+      // Prefer triples where MORE unique names are >= MIN_SUBSTRING_LEN
+      // (less risk of short-name false positives). Iterate in deterministic order.
+      for (const triple of triples) {
+        let allFound = true;
+        for (const name of triple.normNamesSet) {
+          let nameFound = false;
+          if (name.length >= MIN_SUBSTRING_LEN) {
+            for (const utmVal of utmPoolArr) {
+              if (utmVal.includes(name) || name.includes(utmVal)) {
+                nameFound = true;
+                break;
+              }
+            }
+          } else {
+            // Short names: only exact equality (avoids "1" matching "120243...")
+            nameFound = utmPool.has(name);
+          }
+          if (!nameFound) { allFound = false; break; }
+        }
+        if (allFound) {
+          foundTriple = triple;
+          foundVia = 'substring';
           break;
         }
-      }
-      if (allFound) {
-        foundTriple = triple;
-        break;
       }
     }
 
@@ -267,6 +302,8 @@ export async function matchUtmForClient(
       continue;
     }
 
+    if (foundVia === 'exact') matchedExact++; else matchedSubstring++;
+
     matchedLeads.push({
       id: lead.id,
       matched_campaign_id: foundTriple.campaignName,
@@ -276,7 +313,7 @@ export async function matchUtmForClient(
     matched++;
   }
 
-  console.log(`[UTM Matcher] Results: matched=${matched}, skipped=${skipped} (noUtmValues=${noUtmValues})`);
+  console.log(`[UTM Matcher] Results: matched=${matched} (exact=${matchedExact}, substring=${matchedSubstring}), skipped=${skipped} (noUtmValues=${noUtmValues})`);
 
   // ── 6. Обновляем через UPDATE батчами по 50 ──────────────────────────────────
   if (matchedLeads.length > 0) {

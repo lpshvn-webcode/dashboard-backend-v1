@@ -282,7 +282,7 @@ export async function buildCrossAnalytics(
   const leads = await paginatedSelect(
     'crm_leads',
     clientId,
-    'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, mql_reason, is_duplicate',
+    'id, matched_campaign_id, matched_adset_id, matched_ad_id, created_at_crm, price, status, mql_reason, is_duplicate, phone',
     (q) => q.not('matched_campaign_id', 'is', null).eq('is_duplicate', false),
   );
 
@@ -290,6 +290,13 @@ export async function buildCrossAnalytics(
 
   let leadsAttributed = 0;
   let leadsUnattributed = 0;
+  let leadsDedupedByPhone = 0;
+
+  // Phone-based dedup within each (date, campaign, adset, ad) bucket.
+  // Bitrix usually creates a Lead and then converts it to a Deal — both rows
+  // represent the same person and would otherwise double-count leads_crm.
+  // Records without a phone fall through (counted individually).
+  const bucketPhones = new Map<CrossRow, Set<string>>();
 
   for (const lead of leads) {
     const campaignName = lead.matched_campaign_id as string;
@@ -354,19 +361,38 @@ export async function buildCrossAnalytics(
     }
 
     if (target) {
-      target.leads_crm += 1;
+      const phone = (lead.phone as string | null) || '';
+      let phoneSet = bucketPhones.get(target);
+      if (!phoneSet) {
+        phoneSet = new Set<string>();
+        bucketPhones.set(target, phoneSet);
+      }
+
+      // Count person once per bucket (phone == identity). Records without a
+      // phone are always counted — we have no way to dedup them.
+      const isFirstForPhone = !phone || !phoneSet.has(phone);
+
+      if (isFirstForPhone) {
+        target.leads_crm += 1;
+        if (phone) phoneSet.add(phone);
+
+        // Qualified: lead reached a qualified stage in the funnel
+        const isQualifiedByStage = lead.status && qualifiedStageIds.has(lead.status);
+        if (isQualifiedByStage) target.qualified_leads += 1;
+
+        // MQL: qualified by stage OR closed with a valid MQL reason
+        const isQualifiedByMql = mqlReasons.length > 0 && lead.mql_reason && mqlReasons.includes(lead.mql_reason);
+        if (isQualifiedByStage || isQualifiedByMql) target.mql_leads += 1;
+
+        // Sale: stage is marked as sale
+        if (lead.status && saleStageIds.has(lead.status)) target.sales_count += 1;
+      } else {
+        leadsDedupedByPhone++;
+      }
+
+      // Revenue: always sum from whichever record carries the OPPORTUNITY value
+      // (lead price=0 + deal price=X → sum gives X; symmetric is the same).
       target.revenue += Number(lead.price) || 0;
-
-      // Qualified: lead reached a qualified stage in the funnel
-      const isQualifiedByStage = lead.status && qualifiedStageIds.has(lead.status);
-      if (isQualifiedByStage) target.qualified_leads += 1;
-
-      // MQL: qualified by stage OR closed with a valid MQL reason (superset of qualified_leads)
-      const isQualifiedByMql = mqlReasons.length > 0 && lead.mql_reason && mqlReasons.includes(lead.mql_reason);
-      if (isQualifiedByStage || isQualifiedByMql) target.mql_leads += 1;
-
-      // Sale: stage is marked as sale
-      if (lead.status && saleStageIds.has(lead.status)) target.sales_count += 1;
 
       leadsAttributed++;
     } else {
@@ -374,7 +400,7 @@ export async function buildCrossAnalytics(
     }
   }
 
-  console.log(`[CrossBuilder] Leads attributed=${leadsAttributed}, unattributed=${leadsUnattributed}`);
+  console.log(`[CrossBuilder] Leads attributed=${leadsAttributed} (deduped-by-phone=${leadsDedupedByPhone}), unattributed=${leadsUnattributed}`);
 
   // ── 6. Upsert into cross_analytics in batches ─────────────────────────────
   const allRows = Array.from(rowMap.values());

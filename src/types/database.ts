@@ -182,6 +182,8 @@ export interface CrmLead {
   record_type?: string;     // 'lead' or 'deal'
   is_duplicate?: boolean;   // Marked if same phone exists in both leads and deals
   mql_reason?: string;      // Value of the MQL custom field (e.g. rejection reason)
+  source_id?: string;       // Bitrix SOURCE_ID — identifies origin (e.g. CALL, WEB, specific form)
+  source_description?: string; // Bitrix SOURCE_DESCRIPTION — free-form note (e.g. "с формы: с [kense.app]")
   // UTM params for cross-analytics
   utm_source?: string;
   utm_medium?: string;
