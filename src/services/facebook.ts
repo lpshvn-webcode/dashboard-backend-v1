@@ -107,17 +107,12 @@ export async function syncFacebookAccount(
     //   • adsets in CAMPAIGN_PAUSED (campaign paused after run)
     //   • ads in ADSET_PAUSED / CAMPAIGN_PAUSED (adset or campaign paused)
     //   • anything stuck in IN_PROCESS / WITH_ISSUES / review-pipeline states.
-    const campaignStatuses = JSON.stringify([
-      'ACTIVE', 'PAUSED', 'ARCHIVED',
-      'IN_PROCESS', 'WITH_ISSUES',
-      'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO',
-    ]);
-    const adsetStatuses = JSON.stringify([
-      'ACTIVE', 'PAUSED', 'ARCHIVED',
-      'CAMPAIGN_PAUSED',
-      'IN_PROCESS', 'WITH_ISSUES',
-      'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO',
-    ]);
+    // Campaigns can only be ACTIVE/PAUSED/ARCHIVED — review/billing statuses
+    // are only valid for ads, not campaigns (FB returns 400 if passed here).
+    const campaignStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED']);
+    // Adsets also inherit CAMPAIGN_PAUSED when their parent campaign is paused.
+    // Without it we silently drop adsets that ran while campaign was paused.
+    const adsetStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED', 'CAMPAIGN_PAUSED']);
     const adStatuses = JSON.stringify([
       'ACTIVE', 'PAUSED', 'ARCHIVED',
       'ADSET_PAUSED', 'CAMPAIGN_PAUSED',
