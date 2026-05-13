@@ -98,14 +98,26 @@ export async function syncFacebookAccount(
   try {
     // ── 1. Campaigns ──────────────────────────────────────────────────────────
     progress('Загрузка кампаний...', 15);
-    // Include ARCHIVED campaigns/adsets/ads so that historical data from objects
-    // that were archived after running is not lost on re-sync.
-    // NOTE: Facebook API does NOT support querying DELETED objects via list
-    // endpoints — it returns 400 with "deleted objects not supported".
-    const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED']);
-    // Ads inherit pause state from their parent — when an adset/campaign is paused,
-    // its ads get effective_status = ADSET_PAUSED / CAMPAIGN_PAUSED, not PAUSED.
-    // Must include these explicitly or we lose creative-level spend for paused adsets.
+    // Each entity in the Ads hierarchy has its own valid effective_status values.
+    // We must enumerate the non-DELETED ones explicitly per entity type — FB
+    // defaults to ACTIVE+PAUSED only when no filter is passed, and rejects
+    // DELETED queries on list endpoints (400 "deleted objects not supported").
+    //
+    // Without these explicit lists we silently drop:
+    //   • adsets in CAMPAIGN_PAUSED (campaign paused after run)
+    //   • ads in ADSET_PAUSED / CAMPAIGN_PAUSED (adset or campaign paused)
+    //   • anything stuck in IN_PROCESS / WITH_ISSUES / review-pipeline states.
+    const campaignStatuses = JSON.stringify([
+      'ACTIVE', 'PAUSED', 'ARCHIVED',
+      'IN_PROCESS', 'WITH_ISSUES',
+      'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO',
+    ]);
+    const adsetStatuses = JSON.stringify([
+      'ACTIVE', 'PAUSED', 'ARCHIVED',
+      'CAMPAIGN_PAUSED',
+      'IN_PROCESS', 'WITH_ISSUES',
+      'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO',
+    ]);
     const adStatuses = JSON.stringify([
       'ACTIVE', 'PAUSED', 'ARCHIVED',
       'ADSET_PAUSED', 'CAMPAIGN_PAUSED',
@@ -116,7 +128,7 @@ export async function syncFacebookAccount(
     const campaigns: FbCampaign[] = (await fetchAllPages(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
       fields: `id,name,status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-      effective_status: allStatuses,
+      effective_status: campaignStatuses,
       limit: '200',
     })) as FbCampaign[];
 
@@ -171,7 +183,7 @@ export async function syncFacebookAccount(
     const adsets: FbAdset[] = ((await fetchAllPages(`${FB_BASE_URL}/${actId}/adsets`, {
       access_token: account.access_token,
       fields: `id,name,campaign_id,campaign{name},status,effective_status,insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-      effective_status: allStatuses,
+      effective_status: adsetStatuses,
       limit: '500',
     })) as any[]).map((a) => ({ ...a, campaign_name: a.campaign?.name || '' }));
 
