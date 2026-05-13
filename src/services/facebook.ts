@@ -211,88 +211,46 @@ export async function syncFacebookAccount(
     progress(`Сохранено ${adsetStats.length} групп объявлений`, 65);
 
     // ── 3. Ads (Creatives) ────────────────────────────────────────────────────
+    // Account-level /ads is unreliable on Standard Access apps — large lists
+    // get truncated and ads can return with adset_ids that aren't in /adsets.
+    // Iterate per-adset: /{adset_id}/ads returns a small focused list that
+    // Facebook serves reliably even under tight rate limits.
     progress('Загрузка объявлений...', 72);
-    // Include adset{name} + campaign{name} — /adsets pagination on FB is
-    // unreliable; some ads return with adset_id missing from /adsets response.
-    // We backfill adset_stats/campaign_stats from /ads to guarantee completeness.
-    const ads: any[] = await fetchAllPages(`${FB_BASE_URL}/${actId}/ads`, {
-      access_token: account.access_token,
-      fields: `id,name,adset_id,adset{id,name,status},campaign_id,campaign{id,name,status},status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-      effective_status: allStatuses,
-      limit: '500',
-    });
-
-    // ── 3a. Backfill any adsets/campaigns missing from earlier responses ─────
-    const knownAdsetIds = new Set(adsetStats.map(a => a.adset_id));
-    const knownCampaignIds = new Set(campaignStats.map(c => c.campaign_id));
-    const backfillAdsets: AdsetStat[] = [];
-    const backfillCampaigns: CampaignStat[] = [];
-
-    for (const ad of ads) {
-      if (ad.adset && !knownAdsetIds.has(ad.adset.id)) {
-        knownAdsetIds.add(ad.adset.id);
-        backfillAdsets.push({
-          id: '',
-          ad_account_id: account.id,
-          client_id: account.client_id,
-          platform: 'facebook',
-          date: dateRange.until,
-          campaign_id: ad.campaign_id,
-          campaign_name: ad.campaign?.name || '',
-          adset_id: ad.adset.id,
-          adset_name: ad.adset.name,
-          status: ad.adset.status,
-          spend: 0,
-          impressions: 0,
-          clicks: 0,
-          reach: 0,
-          leads: 0,
-          ctr: 0,
-          cpl: 0,
-          cpc: 0,
-          currency: 'USD',
-          created_at: '',
-        });
+    const ads: any[] = [];
+    let adsetIndex = 0;
+    for (const adset of adsets) {
+      adsetIndex++;
+      if (adsetIndex % 10 === 0) {
+        progress(`Загрузка объявлений ${adsetIndex}/${adsets.length}...`, Math.min(72 + Math.round((adsetIndex / adsets.length) * 16), 88));
       }
-      if (ad.campaign && !knownCampaignIds.has(ad.campaign.id)) {
-        knownCampaignIds.add(ad.campaign.id);
-        backfillCampaigns.push({
-          id: '',
-          ad_account_id: account.id,
-          client_id: account.client_id,
-          platform: 'facebook',
-          date: dateRange.until,
-          campaign_id: ad.campaign.id,
-          campaign_name: ad.campaign.name,
-          status: ad.campaign.status,
-          spend: 0,
-          impressions: 0,
-          clicks: 0,
-          reach: 0,
-          leads: 0,
-          ctr: 0,
-          cpl: 0,
-          cpc: 0,
-          currency: 'USD',
-          created_at: '',
+      try {
+        const adsForAdset = await fetchAllPages(`${FB_BASE_URL}/${adset.id}/ads`, {
+          access_token: account.access_token,
+          fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
+          effective_status: allStatuses,
+          limit: '100',
         });
+        ads.push(...adsForAdset);
+      } catch (err: any) {
+        // 17 = User request limit reached; 4 = App throttling. Pause briefly and retry once.
+        const fbCode = err?.response?.data?.error?.code;
+        if (fbCode === 17 || fbCode === 4) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const retry = await fetchAllPages(`${FB_BASE_URL}/${adset.id}/ads`, {
+              access_token: account.access_token,
+              fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
+              effective_status: allStatuses,
+              limit: '100',
+            });
+            ads.push(...retry);
+            continue;
+          } catch {}
+        }
+        console.warn(`[FB] Failed to load ads for adset ${adset.id} (${adset.name}):`, err?.response?.data?.error?.message || err.message);
       }
     }
-
-    if (backfillAdsets.length > 0) {
-      await supabase.from('adset_stats').upsert(
-        backfillAdsets.map(({ id, created_at, ...rest }) => rest),
-        { onConflict: 'ad_account_id,adset_id,date' }
-      );
-      console.log(`[FB] Backfilled ${backfillAdsets.length} adsets from /ads`);
-    }
-    if (backfillCampaigns.length > 0) {
-      await supabase.from('campaign_stats').upsert(
-        backfillCampaigns.map(({ id, created_at, ...rest }) => rest),
-        { onConflict: 'ad_account_id,campaign_id,date' }
-      );
-      console.log(`[FB] Backfilled ${backfillCampaigns.length} campaigns from /ads`);
-    }
+    console.log(`[FB] Loaded ${ads.length} ads across ${adsets.length} adsets`);
 
     const creativeStats: CreativeStat[] = [];
 

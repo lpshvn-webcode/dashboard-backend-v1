@@ -254,78 +254,9 @@ export async function buildCrossAnalytics(
   }
 
   console.log(
-    `[CrossBuilder] Built ${rowMap.size} cross rows from creatives, ` +
+    `[CrossBuilder] Built ${rowMap.size} cross rows, ` +
     `skipped ${skippedNoHierarchy} (no hierarchy), ${skippedPromo} (promo/boost)`
   );
-
-  // ── 4b. Adset-level fallback for adsets that have NO creative rows ─────────
-  // FB sync occasionally drops ads (rate limits, deleted ads, etc.). Without
-  // this fallback, adsets without creatives are missing entirely from
-  // cross_analytics — spend totals undercount, and CRM leads matched only at
-  // the (campaign, adset) level (no ad triple) can never attribute.
-  const adsetStatsRows = await paginatedSelect(
-    'adset_stats',
-    clientId,
-    'ad_account_id, date, campaign_id, campaign_name, adset_id, adset_name, status, spend, impressions, clicks, reach, leads, ctr, cpc, currency, platform',
-    (q) => q.gte('date', dateFrom).lte('date', dateTo),
-  );
-
-  const adsetsCoveredByCreatives = new Set<string>();
-  for (const row of rowMap.values()) {
-    adsetsCoveredByCreatives.add(`${row.adset_id}|${row.date}`);
-  }
-
-  let adsetFallbackAdded = 0;
-  for (const a of adsetStatsRows) {
-    if (!a.adset_id || !a.adset_name || !a.campaign_id) continue;
-    if (adsetsCoveredByCreatives.has(`${a.adset_id}|${a.date}`)) continue; // already covered by ads
-
-    const campaignInfo = campaignMap.get(a.campaign_id);
-    const campaignName = campaignInfo?.name ?? a.campaign_name;
-    if (!campaignName) continue;
-
-    // Synthetic "no ad" row: ad_id = adset_id (so it's unique per adset),
-    // ad_name = '' (UTM matcher's promo/boost guard requires ≥2 unique names).
-    const adId = `adset_${a.adset_id}`;
-    const adName = '';
-
-    const row: CrossRow = {
-      client_id: clientId,
-      date: a.date,
-      platform: a.platform,
-      ad_account_id: a.ad_account_id,
-      campaign_id: a.campaign_id,
-      campaign_name: campaignName,
-      campaign_status: campaignInfo?.status ?? null,
-      adset_id: a.adset_id,
-      adset_name: a.adset_name,
-      ad_id: adId,
-      ad_name: adName,
-      ad_status: a.status,
-      image_url: null,
-      thumbnail_url: null,
-      video_url: null,
-      spend: Number(a.spend) || 0,
-      impressions: Number(a.impressions) || 0,
-      clicks: Number(a.clicks) || 0,
-      reach: Number(a.reach) || 0,
-      leads_platform: Number(a.leads) || 0,
-      ctr: Number(a.ctr) || 0,
-      cpc: Number(a.cpc) || 0,
-      currency: a.currency || 'USD',
-      leads_crm: 0,
-      qualified_leads: 0,
-      mql_leads: 0,
-      sales_count: 0,
-      revenue: 0,
-      spend_local: (Number(a.spend) || 0) * (rateMap.get(a.date) ?? 490),
-    };
-
-    rowMap.set(makeKey(campaignName, a.adset_name, adName, a.date), row);
-    adsetFallbackAdded++;
-  }
-
-  console.log(`[CrossBuilder] Added ${adsetFallbackAdded} adset-level rows (no creatives)`);
 
   // ── 5. Load matched CRM records and attribute to cross rows ────────────────
   //
