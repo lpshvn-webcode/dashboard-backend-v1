@@ -103,6 +103,15 @@ export async function syncFacebookAccount(
     // NOTE: Facebook API does NOT support querying DELETED objects via list
     // endpoints — it returns 400 with "deleted objects not supported".
     const allStatuses = JSON.stringify(['ACTIVE', 'PAUSED', 'ARCHIVED']);
+    // Ads inherit pause state from their parent — when an adset/campaign is paused,
+    // its ads get effective_status = ADSET_PAUSED / CAMPAIGN_PAUSED, not PAUSED.
+    // Must include these explicitly or we lose creative-level spend for paused adsets.
+    const adStatuses = JSON.stringify([
+      'ACTIVE', 'PAUSED', 'ARCHIVED',
+      'ADSET_PAUSED', 'CAMPAIGN_PAUSED',
+      'IN_PROCESS', 'WITH_ISSUES',
+      'PENDING_REVIEW', 'DISAPPROVED', 'PREAPPROVED', 'PENDING_BILLING_INFO',
+    ]);
 
     const campaigns: FbCampaign[] = (await fetchAllPages(`${FB_BASE_URL}/${actId}/campaigns`, {
       access_token: account.access_token,
@@ -227,7 +236,7 @@ export async function syncFacebookAccount(
         const adsForAdset = await fetchAllPages(`${FB_BASE_URL}/${adset.id}/ads`, {
           access_token: account.access_token,
           fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-          effective_status: allStatuses,
+          effective_status: adStatuses,
           limit: '100',
         });
         ads.push(...adsForAdset);
@@ -240,7 +249,7 @@ export async function syncFacebookAccount(
             const retry = await fetchAllPages(`${FB_BASE_URL}/${adset.id}/ads`, {
               access_token: account.access_token,
               fields: `id,name,adset_id,campaign_id,status,effective_status,creative{thumbnail_url,image_url},insights.time_range(${timeRangeJson}).time_increment(1){${insightFields},date_start}`,
-              effective_status: allStatuses,
+              effective_status: adStatuses,
               limit: '100',
             });
             ads.push(...retry);

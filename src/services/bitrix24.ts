@@ -178,10 +178,13 @@ async function fetchContactPhones(
   const phoneMap: Record<string, string> = {};
   if (contactIds.length === 0) return phoneMap;
 
-  // Bitrix24 rate-limit: 2 req/s per user → batch by 50, delay between batches
-  const BATCH_SIZE = 50;
+  // Bitrix24 rate-limit: 2 req/s per user → batch by 25, delay between batches.
+  // Smaller batch keeps response time well under timeout; larger batches often
+  // exceed 30s on slow Bitrix instances and were losing 50 phones per failure.
+  const BATCH_SIZE = 25;
   const BATCH_DELAY_MS = 600; // ~1.6 req/s — safe margin under the 2 req/s limit
   const MAX_RETRIES = 5;
+  const REQUEST_TIMEOUT_MS = 60000;
 
   for (let i = 0; i < contactIds.length; i += BATCH_SIZE) {
     const batch = contactIds.slice(i, i + BATCH_SIZE);
@@ -195,7 +198,7 @@ async function fetchContactPhones(
             SELECT: ['ID', 'PHONE'],
             FILTER: { ID: batch },
           },
-          timeout: 30000,
+          timeout: REQUEST_TIMEOUT_MS,
         });
 
         for (const contact of res.data.result || []) {
@@ -211,16 +214,18 @@ async function fetchContactPhones(
         const isRateLimit =
           status === 429 ||
           (status === 503 && bxError === 'QUERY_LIMIT_EXCEEDED');
+        const isTimeout = err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT';
 
-        if (isRateLimit && retries < MAX_RETRIES) {
+        if ((isRateLimit || isTimeout) && retries < MAX_RETRIES) {
           const waitMs = Math.min(1000 * Math.pow(2, retries), 16000);
-          console.warn(`[Bitrix24] Rate limit on crm.contact.list (attempt ${retries + 1}), waiting ${waitMs}ms`);
+          const kind = isTimeout ? 'timeout' : 'rate-limit';
+          console.warn(`[Bitrix24] ${kind} on crm.contact.list batch ${i}–${i + batch.length} (attempt ${retries + 1}), waiting ${waitMs}ms`);
           await new Promise(resolve => setTimeout(resolve, waitMs));
           retries++;
           continue;
         }
 
-        // Non-retriable error — log and skip this batch, don't crash entire sync
+        // Non-retriable error or retries exhausted — log and skip this batch
         console.error(`[Bitrix24] fetchContactPhones error (batch ${i}–${i + batch.length}):`, err.message);
         break;
       }
