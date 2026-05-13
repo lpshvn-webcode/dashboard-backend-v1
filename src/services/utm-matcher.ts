@@ -190,8 +190,42 @@ export async function matchUtmForClient(
     console.log(`[UTM Matcher] Triple[${i}]: campaign="${t.campaignName}" | adset="${t.adsetName}" | ad="${t.adName}" | uniqueNames=${t.normNamesSet.size}`);
   });
 
-  if (triples.length === 0) {
-    console.warn('[UTM Matcher] No FB triples found — check that campaign/adset/creative stats are synced for this client');
+  // ── 4b. Adset-level pairs fallback ──────────────────────────────────────────
+  // For adsets that have no creative_stats rows (FB sync sometimes drops ads),
+  // build a (campaign, adset) pair so leads can still attribute at the adset
+  // level. matched_ad_id is empty — this aligns with the synthetic adset-level
+  // row that cross-analytics-builder.ts emits for the same case.
+  interface FbPair {
+    campaignName: string;
+    adsetName: string;
+    normNames: string[];
+    normNamesSet: Set<string>;
+  }
+
+  const adsetsWithCreatives = new Set<string>();
+  for (const creative of creatives || []) {
+    if (creative.adset_id) adsetsWithCreatives.add(creative.adset_id);
+  }
+
+  const pairs: FbPair[] = [];
+  for (const [adsetId, adset] of adsetMap.entries()) {
+    if (adsetsWithCreatives.has(adsetId)) continue; // already covered by triples
+    const campaignName = campaignNameMap.get(adset.campaignId);
+    if (!campaignName) continue;
+    const normCampaign = normalize(campaignName);
+    const normAdset = normalize(adset.adsetName);
+    if (!normCampaign || !normAdset || normCampaign === normAdset) continue;
+    pairs.push({
+      campaignName,
+      adsetName: adset.adsetName,
+      normNames: [normCampaign, normAdset],
+      normNamesSet: new Set([normCampaign, normAdset]),
+    });
+  }
+  console.log(`[UTM Matcher] Built ${pairs.length} adset-level pairs for adsets without creatives`);
+
+  if (triples.length === 0 && pairs.length === 0) {
+    console.warn('[UTM Matcher] No FB triples/pairs found — check that campaign/adset/creative stats are synced for this client');
     return { matched: 0, skipped: leads.length };
   }
 
@@ -243,37 +277,52 @@ export async function matchUtmForClient(
       continue;
     }
 
-    // Ищем первую тройку, все уникальные нормализованные названия которой есть в UTM-пуле
+    // 1) Try a full (campaign, adset, ad) triple first — strongest signal.
     let foundTriple: FbTriple | null = null;
     for (const triple of triples) {
       let allFound = true;
       for (const name of triple.normNamesSet) {
-        if (!utmPool.has(name)) {
-          allFound = false;
-          break;
-        }
+        if (!utmPool.has(name)) { allFound = false; break; }
       }
-      if (allFound) {
-        foundTriple = triple;
-        break;
-      }
+      if (allFound) { foundTriple = triple; break; }
     }
 
-    if (!foundTriple) {
-      skipped++;
-      if (skipped <= 5) {
-        console.log(`[UTM Matcher] ❌ NO MATCH lead_id=${lead.id}: source="${lead.utm_source || ''}" campaign="${lead.utm_campaign || ''}"`);
-      }
+    if (foundTriple) {
+      matchedLeads.push({
+        id: lead.id,
+        matched_campaign_id: foundTriple.campaignName,
+        matched_adset_id: foundTriple.adsetName,
+        matched_ad_id: foundTriple.adName,
+      });
+      matched++;
       continue;
     }
 
-    matchedLeads.push({
-      id: lead.id,
-      matched_campaign_id: foundTriple.campaignName,
-      matched_adset_id: foundTriple.adsetName,
-      matched_ad_id: foundTriple.adName,
-    });
-    matched++;
+    // 2) Fallback: (campaign, adset) pair for adsets without creative_stats.
+    let foundPair: FbPair | null = null;
+    for (const pair of pairs) {
+      let allFound = true;
+      for (const name of pair.normNamesSet) {
+        if (!utmPool.has(name)) { allFound = false; break; }
+      }
+      if (allFound) { foundPair = pair; break; }
+    }
+
+    if (foundPair) {
+      matchedLeads.push({
+        id: lead.id,
+        matched_campaign_id: foundPair.campaignName,
+        matched_adset_id: foundPair.adsetName,
+        matched_ad_id: '', // empty = adset-level attribution
+      });
+      matched++;
+      continue;
+    }
+
+    skipped++;
+    if (skipped <= 5) {
+      console.log(`[UTM Matcher] ❌ NO MATCH lead_id=${lead.id}: source="${lead.utm_source || ''}" campaign="${lead.utm_campaign || ''}"`);
+    }
   }
 
   console.log(`[UTM Matcher] Results: matched=${matched}, skipped=${skipped} (noUtmValues=${noUtmValues})`);
