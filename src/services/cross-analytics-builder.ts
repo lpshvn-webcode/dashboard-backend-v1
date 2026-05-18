@@ -297,6 +297,13 @@ export async function buildCrossAnalytics(
   // represent the same person and would otherwise double-count leads_crm.
   // Records without a phone fall through (counted individually).
   const bucketPhones = new Map<CrossRow, Set<string>>();
+  // Track which phones have already been counted as qualified/mql/sale per bucket,
+  // so that a deduped record can still "upgrade" the qualification status when
+  // Bitrix processes a Lead first (non-qualified) and then a Deal (qualified)
+  // for the same contact — without this, the qualified flag would be stuck at 0.
+  const bucketPhoneQualified = new Map<CrossRow, Set<string>>();
+  const bucketPhoneMql       = new Map<CrossRow, Set<string>>();
+  const bucketPhoneSale      = new Map<CrossRow, Set<string>>();
 
   for (const lead of leads) {
     const campaignName = lead.matched_campaign_id as string;
@@ -372,22 +379,58 @@ export async function buildCrossAnalytics(
       // phone are always counted — we have no way to dedup them.
       const isFirstForPhone = !phone || !phoneSet.has(phone);
 
+      // Qualification flags — computed for both first and deduped records.
+      const isQualifiedByStage = !!(lead.status && qualifiedStageIds.has(lead.status));
+      const isQualifiedByMql   = mqlReasons.length > 0 && !!(lead.mql_reason && mqlReasons.includes(lead.mql_reason));
+      const isSale             = !!(lead.status && saleStageIds.has(lead.status));
+
       if (isFirstForPhone) {
         target.leads_crm += 1;
         if (phone) phoneSet.add(phone);
 
-        // Qualified: lead reached a qualified stage in the funnel
-        const isQualifiedByStage = lead.status && qualifiedStageIds.has(lead.status);
-        if (isQualifiedByStage) target.qualified_leads += 1;
-
-        // MQL: qualified by stage OR closed with a valid MQL reason
-        const isQualifiedByMql = mqlReasons.length > 0 && lead.mql_reason && mqlReasons.includes(lead.mql_reason);
-        if (isQualifiedByStage || isQualifiedByMql) target.mql_leads += 1;
-
-        // Sale: stage is marked as sale
-        if (lead.status && saleStageIds.has(lead.status)) target.sales_count += 1;
+        if (isQualifiedByStage) {
+          target.qualified_leads += 1;
+          if (phone) { let s = bucketPhoneQualified.get(target); if (!s) { s = new Set(); bucketPhoneQualified.set(target, s); } s.add(phone); }
+        }
+        if (isQualifiedByStage || isQualifiedByMql) {
+          target.mql_leads += 1;
+          if (phone) { let s = bucketPhoneMql.get(target); if (!s) { s = new Set(); bucketPhoneMql.set(target, s); } s.add(phone); }
+        }
+        if (isSale) {
+          target.sales_count += 1;
+          if (phone) { let s = bucketPhoneSale.get(target); if (!s) { s = new Set(); bucketPhoneSale.set(target, s); } s.add(phone); }
+        }
       } else {
+        // Deduped record: don't count in leads_crm, but DO upgrade qualification
+        // if this record reached a higher stage than the first one for this phone.
+        // Typical case: Lead (CONVERTED, not qualified) processed first, then
+        // Deal (C9:EXECUTING, qualified) gets here — without the upgrade the
+        // qualified count would be stuck at 0 even though the person qualified.
         leadsDedupedByPhone++;
+
+        if (phone) {
+          if (isQualifiedByStage) {
+            let qs = bucketPhoneQualified.get(target);
+            if (!qs || !qs.has(phone)) {
+              target.qualified_leads += 1;
+              if (!qs) { qs = new Set(); bucketPhoneQualified.set(target, qs); } qs.add(phone);
+            }
+          }
+          if (isQualifiedByStage || isQualifiedByMql) {
+            let ms = bucketPhoneMql.get(target);
+            if (!ms || !ms.has(phone)) {
+              target.mql_leads += 1;
+              if (!ms) { ms = new Set(); bucketPhoneMql.set(target, ms); } ms.add(phone);
+            }
+          }
+          if (isSale) {
+            let ss = bucketPhoneSale.get(target);
+            if (!ss || !ss.has(phone)) {
+              target.sales_count += 1;
+              if (!ss) { ss = new Set(); bucketPhoneSale.set(target, ss); } ss.add(phone);
+            }
+          }
+        }
       }
 
       // Revenue: always sum from whichever record carries the OPPORTUNITY value
