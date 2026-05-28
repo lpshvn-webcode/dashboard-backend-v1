@@ -84,8 +84,8 @@ async function main() {
   console.log(`  Duplicates        : ${byDup.duplicate}`);
   console.log(`  Unique (non-dup)  : ${byDup.unique}`);
   console.log(`  Has UTM match     : ${matched}`);
-  console.log(`  Matched + non-dup : ${matchedNonDup}  ← what builder uses (ALL)`);
-  console.log(`    of which deals  : ${matchedDeals}   ← what NEW builder uses (only deals)`);
+  console.log(`  Matched + non-dup : ${matchedNonDup}  ← what current builder attributes`);
+  console.log(`    of which deals  : ${matchedDeals}   ← useful comparison slice`);
   console.log(`    of which leads  : ${matchedLeads}`);
 
   // ── 3. Show unmatched leads (no matched_campaign_id) ────────────────────
@@ -106,7 +106,7 @@ async function main() {
 
   if (countedDeals.length > 0) {
     console.log(`\n${hr()}`);
-    console.log(`MATCHED DEALS — will be counted in NEW builder (${countedDeals.length})`);
+    console.log(`MATCHED DEALS (${countedDeals.length})`);
     console.log(hr());
     countedDeals.slice(0, 15).forEach(r => {
       const date = r.created_at_crm ? r.created_at_crm.substring(0, 10) : '?';
@@ -117,7 +117,7 @@ async function main() {
 
   if (countedLeads.length > 0) {
     console.log(`\n${hr()}`);
-    console.log(`MATCHED LEADS (record_type='lead') — EXCLUDED in new builder (${countedLeads.length})`);
+    console.log(`MATCHED LEADS (record_type='lead') (${countedLeads.length})`);
     console.log(hr());
     countedLeads.slice(0, 15).forEach(r => {
       const date = r.created_at_crm ? r.created_at_crm.substring(0, 10) : '?';
@@ -137,11 +137,13 @@ async function main() {
 
   const crossSpend = (crossRows || []).reduce((s, r) => s + (Number(r.spend) || 0), 0);
   const crossLeads = (crossRows || []).reduce((s, r) => s + (Number(r.leads_crm) || 0), 0);
+  const crossLeadRows = (crossRows || []).filter((r) => (Number(r.leads_crm) || 0) > 0).length;
 
   console.log(`\n${hr()}`);
   console.log('CROSS_ANALYTICS CURRENT STATE (before rebuild)');
   console.log(hr());
   console.log(`  Rows              : ${(crossRows || []).length}`);
+  console.log(`  Rows with leads   : ${crossLeadRows}  ← lead buckets, not lead total`);
   console.log(`  Spend             : $${fmt(crossSpend)}`);
   console.log(`  leads_crm         : ${crossLeads}  ← this is what the dashboard shows`);
 
@@ -179,8 +181,7 @@ async function main() {
 
   if (byType['lead'] > 0 && byType['deal'] > 0) {
     console.log(`⚠️  LEADS discrepancy confirmed: ${byType['lead']} leads + ${byType['deal']} deals in CRM.`);
-    console.log(`   Dashboard was showing: ${crossLeads} (old, both types counted)`);
-    console.log(`   After rebuild will show: ~${matchedDeals} (deals only)`);
+    console.log(`   cross_analytics currently sums to: ${crossLeads} leads across ${crossLeadRows} lead buckets.`);
   } else {
     console.log(`✅ Single record type — no double-count risk. Dashboard shows ${crossLeads}.`);
   }

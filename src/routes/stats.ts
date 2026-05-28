@@ -7,6 +7,18 @@ import { syncExchangeRates, getExchangeRateHistory } from '../services/exchange-
 
 const router = Router();
 
+function makeCampaignGroupKey(row: {
+  platform?: string | null;
+  campaign_id?: string | null;
+  campaign_name?: string | null;
+}): string {
+  return [
+    row.platform || '',
+    row.campaign_id || '',
+    row.campaign_name || '',
+  ].join('|');
+}
+
 // All stats routes require authentication
 
 // GET /api/stats/campaigns?clientId=...&dateFrom=...&dateTo=...&platform=...
@@ -503,7 +515,7 @@ router.post('/sync-exchange-rates', requireAuth, async (req, res) => {
 // &level=campaign|adset|creative&campaignName=...&adsetName=...
 // &platform=...&matchedOnly=true
 router.get('/cross-analytics', requireAuth, async (req, res) => {
-  const { clientId, dateFrom, dateTo, level, campaignName, adsetName, platform, matchedOnly } =
+  const { clientId, dateFrom, dateTo, level, campaignId, campaignName, adsetName, platform, matchedOnly } =
     req.query as Record<string, string>;
   const userId = (req as any).user.id;
 
@@ -540,6 +552,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
       if (platform) q = q.eq('platform', platform);
+      if (campaignId) q = q.eq('campaign_id', campaignId);
       if (campaignName) q = q.eq('campaign_name', campaignName);
       if (adsetName) q = q.eq('adset_name', adsetName);
 
@@ -609,7 +622,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
     if (groupLevel === 'adset') {
       const adsetMap = new Map<string, any>();
       for (const row of allRows) {
-        const key = `${row.adset_id}|${row.campaign_name}`;
+        const key = `${row.platform || ''}|${row.campaign_id || ''}|${row.adset_id || ''}`;
         const existing = adsetMap.get(key);
         if (existing) {
           existing.spend += Number(row.spend) || 0;
@@ -626,6 +639,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
         } else {
           adsetMap.set(key, {
             adset_id: row.adset_id,
+            campaign_id: row.campaign_id,
             adset_name: row.adset_name,
             campaign_name: row.campaign_name,
             platform: row.platform,
@@ -656,7 +670,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
     // Default: campaign level
     const campMap = new Map<string, any>();
     for (const row of allRows) {
-      const key = row.campaign_name;
+      const key = makeCampaignGroupKey(row);
       const existing = campMap.get(key);
       if (existing) {
         existing.spend += Number(row.spend) || 0;
@@ -676,6 +690,7 @@ router.get('/cross-analytics', requireAuth, async (req, res) => {
         if (row.campaign_status === 'ACTIVE') existing.campaign_status = 'ACTIVE';
       } else {
         campMap.set(key, {
+          group_id: key,
           campaign_name: row.campaign_name,
           campaign_id: row.campaign_id,
           campaign_status: row.campaign_status,
@@ -766,12 +781,13 @@ router.get('/cross-kpis', requireAuth, async (req, res) => {
         const campaignsWithLeads = new Set<string>();
         const leadsByCampaign: Record<string, number> = {};
         for (const r of rows) {
-          leadsByCampaign[r.campaign_name] = (leadsByCampaign[r.campaign_name] || 0) + (Number(r.leads_crm) || 0);
+          const key = makeCampaignGroupKey(r);
+          leadsByCampaign[key] = (leadsByCampaign[key] || 0) + (Number(r.leads_crm) || 0);
         }
-        for (const [name, count] of Object.entries(leadsByCampaign)) {
-          if (count > 0) campaignsWithLeads.add(name);
+        for (const [key, count] of Object.entries(leadsByCampaign)) {
+          if (count > 0) campaignsWithLeads.add(key);
         }
-        filteredRows = rows.filter(r => campaignsWithLeads.has(r.campaign_name));
+        filteredRows = rows.filter(r => campaignsWithLeads.has(makeCampaignGroupKey(r)));
       }
 
       const totals = {
@@ -897,9 +913,24 @@ router.get('/debug-data', requireAuth, async (req, res) => {
       .gte('date', from)
       .lte('date', to);
 
-    const crossTotals = { rows: 0, spend: 0, leads_crm: 0, leads_platform: 0, qualified_leads: 0, mql_leads: 0, sales_count: 0, revenue: 0 };
+    const crossTotals = {
+      rows: 0,
+      rows_with_crm_leads: 0,
+      rows_with_qualified_leads: 0,
+      rows_with_mql_leads: 0,
+      spend: 0,
+      leads_crm: 0,
+      leads_platform: 0,
+      qualified_leads: 0,
+      mql_leads: 0,
+      sales_count: 0,
+      revenue: 0,
+    };
     for (const r of crossRows || []) {
       crossTotals.rows++;
+      if ((Number(r.leads_crm) || 0) > 0) crossTotals.rows_with_crm_leads++;
+      if ((Number(r.qualified_leads) || 0) > 0) crossTotals.rows_with_qualified_leads++;
+      if ((Number(r.mql_leads) || 0) > 0) crossTotals.rows_with_mql_leads++;
       crossTotals.spend += Number(r.spend) || 0;
       crossTotals.leads_crm += Number(r.leads_crm) || 0;
       crossTotals.leads_platform += Number(r.leads_platform) || 0;
@@ -922,8 +953,11 @@ router.get('/debug-data', requireAuth, async (req, res) => {
       crossAnalytics: crossTotals,
       diagnosis: [
         leadsBreakdown.byRecordType['lead'] > 0 && leadsBreakdown.byRecordType['deal'] > 0
-          ? `⚠️ DOUBLE-COUNT RISK: Both leads (${leadsBreakdown.byRecordType['lead']}) and deals (${leadsBreakdown.byRecordType['deal']}) present. Builder now uses deals only (matchedDealsOnly=${leadsBreakdown.matchedDealsOnly}).`
+          ? `⚠️ DOUBLE-COUNT RISK: Both leads (${leadsBreakdown.byRecordType['lead']}) and deals (${leadsBreakdown.byRecordType['deal']}) present. cross_analytics currently counts matched non-duplicate CRM records, while debug_data also reports matchedDealsOnly=${leadsBreakdown.matchedDealsOnly} for comparison.`
           : '✅ Single record type — no double-count risk.',
+        crossTotals.rows_with_crm_leads > 0
+          ? `ℹ️ cross_analytics has ${crossTotals.rows_with_crm_leads} lead buckets that sum to ${crossTotals.leads_crm} CRM leads. Counting rows is not the same as counting leads.`
+          : 'ℹ️ No cross_analytics rows with CRM leads in this range.',
         crossTotals.spend < 10 && (creativeStats || []).length > 0
           ? `⚠️ LOW SPEND in cross_analytics ($${crossTotals.spend.toFixed(2)}) vs ${(creativeStats || []).length} creative_stats rows. Run build-cross-analytics to refresh.`
           : `✅ cross_analytics spend: $${crossTotals.spend.toFixed(2)}`,
