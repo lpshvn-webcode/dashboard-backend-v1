@@ -7,6 +7,7 @@ import statsRouter from './routes/stats';
 import connectionsRouter from './routes/connections';
 import cronRouter from './routes/cron';
 import webhooksRouter from './routes/webhooks';
+import guestRouter from './routes/guest';
 import { syncAllAdsAccounts, syncAllCrmConnections } from './services/sync-orchestrator';
 import { syncTodayRateForAllClients } from './services/exchange-rate-service';
 
@@ -25,6 +26,7 @@ app.use('/api/stats', statsRouter);
 app.use('/api/connections', connectionsRouter);
 app.use('/api/cron', cronRouter);
 app.use('/api/webhooks', webhooksRouter);
+app.use('/api/guest', guestRouter);
 
 // Health check
 app.get('/api/health', (req, res) => {
