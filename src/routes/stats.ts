@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth';
 import { supabase } from '../lib/supabase';
 import { matchUtmForClient } from '../services/utm-matcher';
 import { buildCrossAnalytics } from '../services/cross-analytics-builder';
+import { getCrmAnalytics } from '../services/crm-analytics';
 import { syncExchangeRates, getExchangeRateHistory } from '../services/exchange-rate-service';
 
 const router = Router();
@@ -17,6 +18,21 @@ function makeCampaignGroupKey(row: {
     row.campaign_id || '',
     row.campaign_name || '',
   ].join('|');
+}
+
+function parseMultiValue(input: unknown): string[] {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input
+      .flatMap((value) => String(value).split(','))
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  return String(input)
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
 }
 
 // All stats routes require authentication
@@ -204,6 +220,39 @@ router.get('/leads', requireAuth, async (req, res) => {
   }
 
   res.json({ data: allRows });
+});
+
+// GET /api/stats/crm-analytics?clientId=...&dateFrom=...&dateTo=...&campaignIds=...&adsetIds=...&creativeIds=...
+router.get('/crm-analytics', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const { clientId, dateFrom, dateTo } = req.query as Record<string, string>;
+
+  if (!clientId) return res.status(400).json({ error: 'clientId required' });
+  if (!dateFrom || !dateTo) return res.status(400).json({ error: 'dateFrom and dateTo required' });
+
+  const { data: client, error: clientError } = await supabase
+    .from('clients')
+    .select('id,user_id,settings')
+    .eq('id', clientId)
+    .single();
+
+  if (clientError) return res.status(500).json({ error: clientError.message });
+  if (!client || client.user_id !== userId) return res.status(403).json({ error: 'Access denied' });
+
+  try {
+    const payload = await getCrmAnalytics(supabase, client, {
+      clientId,
+      dateFrom,
+      dateTo,
+      campaignIds: parseMultiValue(req.query.campaignIds),
+      adsetIds: parseMultiValue(req.query.adsetIds),
+      creativeIds: parseMultiValue(req.query.creativeIds),
+    });
+
+    return res.json(payload);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message || 'Failed to load CRM analytics' });
+  }
 });
 
 // GET /api/stats/overview?clientId=...&dateFrom=...&dateTo=...
