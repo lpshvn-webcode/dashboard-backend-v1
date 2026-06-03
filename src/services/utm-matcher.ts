@@ -49,10 +49,35 @@ export async function matchUtmForClient(
   clientId: string,
   forceRematching = false
 ): Promise<{ matched: number; skipped: number }> {
+  const PAGE_SIZE = 1000;
+
+  async function loadAllRows(select: string, table: string): Promise<any[]> {
+    const rows: any[] = [];
+    let page = 0;
+
+    while (true) {
+      const { data: batch, error } = await supabase
+        .from(table)
+        .select(select)
+        .eq('client_id', clientId)
+        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
+
+      if (error) {
+        console.error(`[UTM Matcher] Failed to fetch ${table} page ${page}:`, error.message);
+        return rows;
+      }
+      if (!batch || batch.length === 0) break;
+
+      rows.push(...batch);
+      if (batch.length < PAGE_SIZE) break;
+      page++;
+    }
+
+    return rows;
+  }
 
   // ── 1. Загрузить ВСЕ лиды клиента ────────────────────────────────────────────
   // Supabase по умолчанию возвращает 1000 строк — используем пагинацию.
-  const PAGE_SIZE = 1000;
   let allLeads: any[] = [];
   let page = 0;
 
@@ -98,13 +123,10 @@ export async function matchUtmForClient(
   });
 
   // ── 2. Загрузить campaign_name по campaign_id ────────────────────────────────
-  const { data: campaigns } = await supabase
-    .from('campaign_stats')
-    .select('campaign_id, campaign_name')
-    .eq('client_id', clientId);
+  const campaigns = await loadAllRows('campaign_id, campaign_name', 'campaign_stats');
 
   const campaignNameMap = new Map<string, string>(); // campaign_id → campaign_name (первое вхождение)
-  for (const row of campaigns || []) {
+  for (const row of campaigns) {
     if (row.campaign_id && row.campaign_name && !campaignNameMap.has(row.campaign_id)) {
       campaignNameMap.set(row.campaign_id, row.campaign_name);
     }
@@ -112,13 +134,10 @@ export async function matchUtmForClient(
   console.log(`[UTM Matcher] Loaded ${campaignNameMap.size} unique campaigns`);
 
   // ── 3. Загрузить adset_name + campaign_id по adset_id ───────────────────────
-  const { data: adsets } = await supabase
-    .from('adset_stats')
-    .select('adset_id, adset_name, campaign_id')
-    .eq('client_id', clientId);
+  const adsets = await loadAllRows('adset_id, adset_name, campaign_id', 'adset_stats');
 
   const adsetMap = new Map<string, { adsetName: string; campaignId: string }>();
-  for (const row of adsets || []) {
+  for (const row of adsets) {
     if (row.adset_id && !adsetMap.has(row.adset_id)) {
       adsetMap.set(row.adset_id, { adsetName: row.adset_name, campaignId: row.campaign_id });
     }
@@ -126,10 +145,7 @@ export async function matchUtmForClient(
   console.log(`[UTM Matcher] Loaded ${adsetMap.size} unique adsets`);
 
   // ── 4. Загрузить креативы и построить тройки ─────────────────────────────────
-  const { data: creatives } = await supabase
-    .from('creative_stats')
-    .select('ad_id, ad_name, adset_id')
-    .eq('client_id', clientId);
+  const creatives = await loadAllRows('ad_id, ad_name, adset_id', 'creative_stats');
 
   interface FbTriple {
     campaignName: string;
@@ -145,7 +161,7 @@ export async function matchUtmForClient(
   const tripleKeysSeen = new Set<string>();
   let skippedPromo = 0;
 
-  for (const creative of creatives || []) {
+  for (const creative of creatives) {
     if (!creative.ad_id || !creative.ad_name) continue;
 
     const adset = adsetMap.get(creative.adset_id);
